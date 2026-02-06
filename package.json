@@ -1,0 +1,16 @@
+{
+  "name": "call-forward",
+  "version": "1.0.0",
+  "description": "Twilio call forwarding with Clinicea patient lookup",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "twilio": "^5.4.3"
+  }
+}
