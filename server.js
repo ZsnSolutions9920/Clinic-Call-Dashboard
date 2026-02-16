@@ -1,8 +1,10 @@
 require('dotenv').config();
 const express = require('express');
+const session = require('express-session');
 const http = require('http');
 const { Server } = require('socket.io');
 const Database = require('better-sqlite3');
+const crypto = require('crypto');
 const path = require('path');
 
 const app = express();
@@ -12,6 +14,10 @@ const io = new Server(server);
 const PORT = process.env.PORT || 3000;
 const DOCTOR_PHONE = process.env.DOCTOR_PHONE;
 const CLINICEA_BASE_URL = process.env.CLINICEA_BASE_URL || 'https://app.clinicea.com/clinic.aspx';
+
+// --- Hardcoded Login Credentials ---
+const ADMIN_USERNAME = 'admin';
+const ADMIN_PASSWORD = 'clinicea2025';
 
 // Clinicea API configuration
 const CLINICEA_API_KEY = process.env.CLINICEA_API_KEY;
@@ -44,11 +50,69 @@ const paginatedCalls = db.prepare(
 // --- Middleware ---
 app.use(express.urlencoded({ extended: false })); // Twilio sends form-encoded
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(session({
+  secret: crypto.randomBytes(32).toString('hex'),
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+}));
 
-// --- Routes ---
+// --- Auth ---
+function requireAuth(req, res, next) {
+  if (req.session && req.session.loggedIn) return next();
+  if (req.headers.accept && req.headers.accept.includes('application/json')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  return res.redirect('/login');
+}
 
-// Twilio webhook - incoming call handler
+// Login page
+app.get('/login', (req, res) => {
+  const error = req.query.error ? '<p style="color:#e74c3c;margin-bottom:16px;">Invalid username or password</p>' : '';
+  res.send(`<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>Login - Clinic Call Dashboard</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;display:flex;align-items:center;justify-content:center;min-height:100vh}
+    .login-box{background:#fff;padding:40px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.1);width:100%;max-width:380px}
+    .login-box h1{font-size:22px;color:#1a1a2e;margin-bottom:24px;text-align:center}
+    label{display:block;font-size:14px;font-weight:600;color:#333;margin-bottom:6px}
+    input{width:100%;padding:10px 14px;border:1px solid #dee2e6;border-radius:6px;font-size:15px;margin-bottom:16px}
+    input:focus{outline:none;border-color:#1a1a2e;box-shadow:0 0 0 2px rgba(26,26,46,0.15)}
+    button{width:100%;padding:12px;background:#1a1a2e;color:#fff;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer}
+    button:hover{background:#2d2d5e}
+  </style>
+</head><body>
+  <div class="login-box">
+    <h1>Clinic Call Dashboard</h1>
+    ${error}
+    <form method="POST" action="/login">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" required autofocus>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required>
+      <button type="submit">Sign In</button>
+    </form>
+  </div>
+</body></html>`);
+});
+
+app.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+    req.session.loggedIn = true;
+    return res.redirect('/');
+  }
+  return res.redirect('/login?error=1');
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/login'));
+});
+
+// Twilio webhook - NO auth (Twilio must reach this)
 app.post('/incoming_call', (req, res) => {
   const caller = req.body.From || 'Unknown';
   const callSid = req.body.CallSid || '';
@@ -82,8 +146,12 @@ app.post('/incoming_call', (req, res) => {
 </Response>`);
 });
 
+// Protected dashboard - serve static files behind auth
+app.get('/', requireAuth, (req, res, next) => next());
+app.use(requireAuth, express.static(path.join(__dirname, 'public')));
+
 // API - paginated call history
-app.get('/api/calls', (req, res) => {
+app.get('/api/calls', requireAuth, (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || PAGE_SIZE));
   const offset = (page - 1) * limit;
@@ -179,7 +247,7 @@ async function getNextAppointmentForPatient(patientID) {
 }
 
 // API - next meeting for a phone number
-app.get('/api/next-meeting/:phone', async (req, res) => {
+app.get('/api/next-meeting/:phone', requireAuth, async (req, res) => {
   const phone = decodeURIComponent(req.params.phone);
 
   if (!isClinicaConfigured()) {
