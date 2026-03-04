@@ -120,20 +120,15 @@ while ($true) {
 
                 # Check if it's a call notification
                 if ($fullText -match "incoming|call|calling|ringing|answer|decline") {
-                    # Extract phone number (various formats)
+                    # Extract phone number — strip call keywords first, then clean
+                    $numberPart = $fullText -replace '(?i)(incoming\s*call|calling|ringing|answer|decline|voice\s*call)', ''
+                    $numberPart = $numberPart.Trim()
+
                     $phone = $null
 
-                    # Try international format: +923001234567
-                    if ($fullText -match '(\+\d{10,15})') {
-                        $phone = $Matches[1]
-                    }
-                    # Try local format: 03001234567 or 0300-1234567
-                    elseif ($fullText -match '(0\d{2,4}[\s\-]?\d{6,8})') {
-                        $phone = $Matches[1] -replace '[\s\-]', ''
-                    }
-                    # Try any number sequence 10+ digits
-                    elseif ($fullText -match '(\d{10,15})') {
-                        $phone = $Matches[1]
+                    # Match anything that looks like a phone number: +1 618-822-3636, +923001234567, 03001234567, etc.
+                    if ($numberPart -match '(\+?[\d][\d\s\-\(\)]{7,18}[\d])') {
+                        $phone = $Matches[1] -replace '[\s\-\(\)]', ''
                     }
 
                     if ($phone) {
