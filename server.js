@@ -134,16 +134,8 @@ app.post('/incoming_call', (req, res) => {
     timestamp: new Date().toISOString()
   });
 
-  // Respond with TwiML to forward the call to doctor's mobile
-  const twilioNumber = req.body.To || req.body.Called;
-  res.type('text/xml');
-  res.send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice">Please hold while we connect you to the doctor.</Say>
-    <Dial timeout="40" callerId="${twilioNumber}">
-        <Number>${DOCTOR_PHONE}</Number>
-    </Dial>
-</Response>`);
+  // Respond with OK (no Twilio - calls answered directly on phone/PC)
+  res.json({ status: 'ok', caller, cliniceaUrl });
 });
 
 // Protected dashboard - serve static files behind auth
