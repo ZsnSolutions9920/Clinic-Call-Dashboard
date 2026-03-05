@@ -230,6 +230,94 @@
     }
 
     .empty-state p { font-size: 16px; }
+
+    /* Event log panel */
+    .log-panel {
+      margin-top: 24px;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+
+    .log-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: #f8f9fa;
+      border-bottom: 1px solid #e9ecef;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .log-header h3 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #6c757d;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .log-header .toggle { font-size: 12px; color: #6c757d; }
+
+    .log-body {
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      font-size: 12px;
+    }
+
+    .log-body.collapsed { display: none; }
+
+    .log-entry {
+      padding: 6px 16px;
+      border-bottom: 1px solid #f5f5f5;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .log-entry:last-child { border-bottom: none; }
+
+    .log-time { color: #999; white-space: nowrap; min-width: 70px; }
+
+    .log-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      min-width: 42px;
+      text-align: center;
+    }
+
+    .log-badge.info { background: #d1ecf1; color: #0c5460; }
+    .log-badge.warn { background: #fff3cd; color: #856404; }
+    .log-badge.error { background: #f8d7da; color: #721c24; }
+
+    .log-msg { color: #333; word-break: break-word; }
+    .log-details { color: #888; font-style: italic; }
+
+    .log-empty { padding: 20px 16px; color: #999; text-align: center; }
+
+    .error-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #e74c3c;
+      color: white;
+      font-size: 11px;
+      font-weight: 700;
+      min-width: 18px;
+      height: 18px;
+      border-radius: 9px;
+      padding: 0 5px;
+      margin-left: 8px;
+    }
+
+    .error-count.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -276,6 +364,16 @@
     <div id="callHistory">
       <div class="empty-state">
         <p>No calls yet. Waiting for incoming calls...</p>
+      </div>
+    </div>
+
+    <div class="log-panel">
+      <div class="log-header" onclick="toggleLog()">
+        <h3>Event Log <span class="error-count hidden" id="errorCount">0</span></h3>
+        <span class="toggle" id="logToggle">Show</span>
+      </div>
+      <div class="log-body collapsed" id="logBody">
+        <div class="log-empty" id="logEmpty">No events yet</div>
       </div>
     </div>
   </div>
@@ -516,6 +614,73 @@
         // Audio not supported
       }
     }
+
+    // --- Event Log ---
+    const logBody = document.getElementById('logBody');
+    const logEmpty = document.getElementById('logEmpty');
+    const logToggle = document.getElementById('logToggle');
+    const errorCountEl = document.getElementById('errorCount');
+    let logOpen = false;
+    let errorCount = 0;
+
+    function toggleLog() {
+      logOpen = !logOpen;
+      logBody.classList.toggle('collapsed', !logOpen);
+      logToggle.textContent = logOpen ? 'Hide' : 'Show';
+      if (logOpen) {
+        errorCount = 0;
+        errorCountEl.classList.add('hidden');
+        logBody.scrollTop = logBody.scrollHeight;
+      }
+    }
+
+    function addLogEntry(entry) {
+      logEmpty.style.display = 'none';
+      const div = document.createElement('div');
+      div.className = 'log-entry';
+      const time = new Date(entry.time).toLocaleTimeString();
+      let html = '<span class="log-time">' + time + '</span>';
+      html += '<span class="log-badge ' + entry.type + '">' + entry.type + '</span>';
+      html += '<span class="log-msg">' + escapeHtml(entry.message);
+      if (entry.details) html += ' <span class="log-details">(' + escapeHtml(entry.details) + ')</span>';
+      html += '</span>';
+      div.innerHTML = html;
+      logBody.appendChild(div);
+
+      // Keep max 50 entries in DOM
+      while (logBody.children.length > 51) { // 51 because of logEmpty
+        logBody.removeChild(logBody.children[1]);
+      }
+
+      // Auto-scroll if log is open
+      if (logOpen) logBody.scrollTop = logBody.scrollHeight;
+
+      // Flash error count if log is closed and it's an error
+      if (!logOpen && (entry.type === 'error' || entry.type === 'warn')) {
+        errorCount++;
+        errorCountEl.textContent = errorCount;
+        errorCountEl.classList.remove('hidden');
+      }
+    }
+
+    function escapeHtml(str) {
+      const d = document.createElement('div');
+      d.textContent = str;
+      return d.innerHTML;
+    }
+
+    // Listen for real-time log events
+    socket.on('server_log', (entry) => addLogEntry(entry));
+
+    // Load existing logs on page load
+    async function loadLogs() {
+      try {
+        const res = await fetch('/api/logs');
+        const data = await res.json();
+        data.logs.forEach(entry => addLogEntry(entry));
+      } catch (e) {}
+    }
+    loadLogs();
 
     // Load history on page load
     loadCallHistory();

@@ -56,6 +56,20 @@ const paginatedCalls = db.prepare(
   'SELECT * FROM calls ORDER BY timestamp DESC LIMIT ? OFFSET ?'
 );
 
+// --- Server Event Log (pushed to dashboard) ---
+const eventLog = []; // last 50 events kept in memory
+const MAX_LOG = 50;
+
+function logEvent(type, message, details) {
+  const entry = { type, message, details: details || null, time: new Date().toISOString() };
+  eventLog.push(entry);
+  if (eventLog.length > MAX_LOG) eventLog.shift();
+  io.emit('server_log', entry);
+  // Also log to console
+  const prefix = type === 'error' ? '[ERROR]' : type === 'warn' ? '[WARN]' : '[INFO]';
+  console.log(`${prefix} ${message}${details ? ' | ' + details : ''}`);
+}
+
 // --- Middleware ---
 app.use(express.urlencoded({ extended: false })); // Twilio sends form-encoded
 app.use(express.json());
@@ -123,9 +137,10 @@ app.get('/logout', (req, res) => {
 
 // Webhook auth middleware
 function requireWebhookSecret(req, res, next) {
-  if (!WEBHOOK_SECRET) return next(); // no secret configured = no auth
+  if (!WEBHOOK_SECRET) return next();
   const provided = req.headers['x-webhook-secret'] || req.body.secret;
   if (provided !== WEBHOOK_SECRET) {
+    logEvent('error', 'Webhook auth failed — invalid secret', 'IP: ' + (req.ip || req.connection.remoteAddress));
     return res.status(401).json({ error: 'Invalid webhook secret' });
   }
   next();
@@ -142,8 +157,7 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   // Log to database
   insertCall.run(caller, callSid, cliniceaUrl);
 
-  console.log(`[INCOMING CALL] From: ${caller} | SID: ${callSid}`);
-  console.log(`[CLINICEA] ${cliniceaUrl}`);
+  logEvent('info', 'Incoming call: ' + caller, 'SID: ' + callSid);
 
   // Push to doctor's dashboard via WebSocket
   io.emit('incoming_call', {
@@ -161,8 +175,10 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
 let lastHeartbeat = 0;
 
 app.post('/heartbeat', requireWebhookSecret, (req, res) => {
+  const wasDown = (Date.now() - lastHeartbeat) > 60000;
   lastHeartbeat = Date.now();
   io.emit('monitor_status', { alive: true });
+  if (wasDown) logEvent('info', 'Call monitor connected (heartbeat received)');
   res.json({ status: 'ok' });
 });
 
@@ -493,12 +509,15 @@ function isClinicaConfigured() {
 async function cliniceaLogin() {
   const url = `${CLINICEA_API_BASE}/api/v2/login/getTokenByStaffUsernamePwd?apiKey=${encodeURIComponent(CLINICEA_API_KEY)}&loginUserName=${encodeURIComponent(CLINICEA_STAFF_USERNAME)}&pwd=${encodeURIComponent(CLINICEA_STAFF_PASSWORD)}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Clinicea login failed: ${res.status}`);
+  if (!res.ok) {
+    logEvent('error', 'Clinicea API login failed', 'HTTP ' + res.status);
+    throw new Error('Clinicea login failed: ' + res.status);
+  }
   const data = await res.json();
   // Token is returned as a plain string
   cliniceaToken = typeof data === 'string' ? data : (data.Token || data.token || data.sessionId);
   tokenExpiry = Date.now() + 55 * 60 * 1000;
-  console.log('[CLINICEA] Logged in successfully');
+  logEvent('info', 'Clinicea API login successful');
   return cliniceaToken;
 }
 
@@ -528,7 +547,7 @@ async function cliniceaFetch(endpoint) {
   try {
     return JSON.parse(text);
   } catch {
-    console.error('[CLINICEA] Non-JSON response:', text.substring(0, 100));
+    logEvent('warn', 'Clinicea API returned non-JSON', text.substring(0, 100));
     return [];
   }
 }
@@ -592,26 +611,26 @@ app.get('/api/next-meeting/:phone', requireAuth, async (req, res) => {
     meetingCache.set(phone, { data: result, expiry: Date.now() + CACHE_TTL });
     return res.json(result);
   } catch (err) {
-    console.error('[CLINICEA API ERROR]', err.message);
+    logEvent('error', 'Clinicea API error', err.message);
     return res.json({ nextMeeting: null, error: err.message });
   }
 });
 
+// API - event log history
+app.get('/api/logs', requireAuth, (req, res) => {
+  res.json({ logs: eventLog });
+});
+
 // --- Socket.IO ---
 io.on('connection', (socket) => {
-  console.log('[DASHBOARD] Doctor connected');
+  logEvent('info', 'Dashboard client connected');
   socket.on('disconnect', () => {
-    console.log('[DASHBOARD] Doctor disconnected');
+    logEvent('info', 'Dashboard client disconnected');
   });
 });
 
 // --- Start ---
 server.listen(PORT, () => {
-  console.log(`\n=== Call Forward Server ===`);
-  console.log(`Dashboard:  http://localhost:${PORT}`);
-  console.log(`Webhook:    http://localhost:${PORT}/incoming_call`);
-  console.log(`Doctor:     ${DOCTOR_PHONE}`);
-  console.log(`Clinicea:   ${CLINICEA_BASE_URL}`);
-  console.log(`Clinicea API: ${isClinicaConfigured() ? 'Configured' : 'Not configured (set CLINICEA_API_KEY, CLINICEA_STAFF_USERNAME, CLINICEA_STAFF_PASSWORD in .env)'}`);
-  console.log(`===========================\n`);
+  logEvent('info', 'Server started on port ' + PORT);
+  logEvent('info', 'Clinicea API: ' + (isClinicaConfigured() ? 'Configured' : 'Not configured'));
 });
