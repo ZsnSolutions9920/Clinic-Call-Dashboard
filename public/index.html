@@ -235,9 +235,15 @@
 <body>
   <div class="header">
     <h1>Clinic Call Dashboard</h1>
-    <div class="status">
-      <div class="status-dot" id="statusDot"></div>
-      <span id="statusText">Disconnected</span>
+    <div style="display:flex;align-items:center;gap:20px;">
+      <div class="status">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Disconnected</span>
+      </div>
+      <div class="status">
+        <div class="status-dot" id="monitorDot"></div>
+        <span id="monitorText">Monitor: Unknown</span>
+      </div>
     </div>
   </div>
 
@@ -254,7 +260,13 @@
       <a id="cliniceaLink" href="#" target="_blank">Open Patient Profile in Clinicea</a>
     </div>
 
-    <h2 class="section-title">Call History</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h2 class="section-title" style="margin-bottom:0;">Call History</h2>
+      <a href="/download/call-monitor" style="display:inline-flex;align-items:center;gap:6px;padding:8px 16px;background:#1a1a2e;color:white;text-decoration:none;border-radius:6px;font-size:13px;font-weight:600;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Install Call Monitor
+      </a>
+    </div>
     <div id="callHistory">
       <div class="empty-state">
         <p>No calls yet. Waiting for incoming calls...</p>
@@ -266,6 +278,8 @@
     const socket = io();
     const statusDot = document.getElementById('statusDot');
     const statusText = document.getElementById('statusText');
+    const monitorDot = document.getElementById('monitorDot');
+    const monitorText = document.getElementById('monitorText');
     const notification = document.getElementById('notification');
     const callerNumberText = document.getElementById('callerNumberText');
     const callerWhatsapp = document.getElementById('callerWhatsapp');
@@ -291,6 +305,30 @@
       statusDot.classList.remove('connected');
       statusText.textContent = 'Disconnected';
     });
+
+    // Monitor status
+    function setMonitorStatus(alive) {
+      if (alive) {
+        monitorDot.classList.add('connected');
+        monitorText.textContent = 'Monitor: Connected';
+      } else {
+        monitorDot.classList.remove('connected');
+        monitorText.textContent = 'Monitor: Disconnected';
+      }
+    }
+
+    socket.on('monitor_status', (data) => setMonitorStatus(data.alive));
+
+    // Check monitor status on load and every 30s
+    async function checkMonitorStatus() {
+      try {
+        const res = await fetch('/api/monitor-status');
+        const data = await res.json();
+        setMonitorStatus(data.alive);
+      } catch (e) { setMonitorStatus(false); }
+    }
+    checkMonitorStatus();
+    setInterval(checkMonitorStatus, 30000);
 
     // Incoming call handler
     socket.on('incoming_call', (data) => {

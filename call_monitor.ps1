@@ -9,7 +9,10 @@
     - Node.js server running (node server.js)
 #>
 
-$webhookUrl = "http://localhost:3000/incoming_call"
+# ── Configuration ──
+$webhookUrl = "https://clinicea.scalamatic.com/incoming_call"
+$heartbeatUrl = "https://clinicea.scalamatic.com/heartbeat"
+$webhookSecret = "4b8f2c9d1e6a3f7b8c2d5e9f1a4b6c3d"
 
 Write-Host ""
 Write-Host "=== Phone Link Call Monitor ===" -ForegroundColor Cyan
@@ -80,6 +83,7 @@ Write-Host ""
 # ── Track which notifications we've already seen ──
 $seenIds = @{}
 $recentCalls = @{}  # Prevent duplicate triggers for the same call
+$lastHeartbeat = [DateTimeOffset]::Now.ToUnixTimeSeconds() - 999  # Force immediate heartbeat
 
 while ($true) {
     try {
@@ -143,14 +147,15 @@ while ($true) {
 
                         # POST to webhook
                         $body = "From=$([uri]::EscapeDataString($phone))&CallSid=local-$now"
+                        $headers = @{ "X-Webhook-Secret" = $webhookSecret }
                         try {
                             $response = Invoke-RestMethod -Uri $webhookUrl -Method POST `
                                 -Body $body -ContentType "application/x-www-form-urlencoded" `
-                                -TimeoutSec 5
+                                -Headers $headers -TimeoutSec 5
                             Write-Host "  -> Dashboard notified! Clinicea: $($response.cliniceaUrl)" -ForegroundColor Cyan
                         } catch {
                             Write-Host "  -> Webhook error: $($_.Exception.Message)" -ForegroundColor Red
-                            Write-Host "     Is the server running? (node server.js)" -ForegroundColor Yellow
+                            Write-Host "     Is the server running?" -ForegroundColor Yellow
                         }
                     } else {
                         Write-Host "[$ts] Call detected but could not extract number from: $fullText" -ForegroundColor Yellow
@@ -179,6 +184,18 @@ while ($true) {
         $err = $_.Exception.Message
         if ($err -notmatch "denied|access") {
             Write-Host "[ERROR] $err" -ForegroundColor Red
+        }
+    }
+
+    # Send heartbeat every 30 seconds
+    $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    if (($now - $lastHeartbeat) -ge 30) {
+        try {
+            $hbHeaders = @{ "X-Webhook-Secret" = $webhookSecret }
+            Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Headers $hbHeaders -TimeoutSec 5 | Out-Null
+            $lastHeartbeat = $now
+        } catch {
+            # Silently ignore heartbeat failures
         }
     }
 

@@ -4,7 +4,6 @@ const session = require('express-session');
 const http = require('http');
 const { Server } = require('socket.io');
 const Database = require('better-sqlite3');
-const crypto = require('crypto');
 const path = require('path');
 
 const app = express();
@@ -14,6 +13,16 @@ const io = new Server(server);
 const PORT = process.env.PORT || 3000;
 const DOCTOR_PHONE = process.env.DOCTOR_PHONE;
 const CLINICEA_BASE_URL = process.env.CLINICEA_BASE_URL || 'https://app.clinicea.com/clinic.aspx';
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+
+if (!SESSION_SECRET) {
+  console.error('ERROR: SESSION_SECRET is not set in .env');
+  process.exit(1);
+}
+
+// Trust Nginx proxy (needed for secure cookies behind reverse proxy)
+app.set('trust proxy', 1);
 
 // --- Hardcoded Login Credentials ---
 const ADMIN_USERNAME = 'admin';
@@ -51,7 +60,7 @@ const paginatedCalls = db.prepare(
 app.use(express.urlencoded({ extended: false })); // Twilio sends form-encoded
 app.use(express.json());
 app.use(session({
-  secret: crypto.randomBytes(32).toString('hex'),
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
@@ -112,8 +121,18 @@ app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
 });
 
-// Twilio webhook - NO auth (Twilio must reach this)
-app.post('/incoming_call', (req, res) => {
+// Webhook auth middleware
+function requireWebhookSecret(req, res, next) {
+  if (!WEBHOOK_SECRET) return next(); // no secret configured = no auth
+  const provided = req.headers['x-webhook-secret'] || req.body.secret;
+  if (provided !== WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+  next();
+}
+
+// Call webhook - secured with WEBHOOK_SECRET
+app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   const caller = req.body.From || 'Unknown';
   const callSid = req.body.CallSid || '';
 
@@ -134,9 +153,194 @@ app.post('/incoming_call', (req, res) => {
     timestamp: new Date().toISOString()
   });
 
-  // Respond with OK (no Twilio - calls answered directly on phone/PC)
+  // Respond with OK
   res.json({ status: 'ok', caller, cliniceaUrl });
 });
+
+// --- Monitor Heartbeat ---
+let lastHeartbeat = 0;
+
+app.post('/heartbeat', requireWebhookSecret, (req, res) => {
+  lastHeartbeat = Date.now();
+  io.emit('monitor_status', { alive: true });
+  res.json({ status: 'ok' });
+});
+
+app.get('/api/monitor-status', requireAuth, (req, res) => {
+  const alive = (Date.now() - lastHeartbeat) < 60000; // alive if heartbeat within 60s
+  res.json({ alive });
+});
+
+// --- Download call monitor installer (pre-configured) ---
+app.get('/download/call-monitor', requireAuth, (req, res) => {
+  const host = req.get('host');
+  const protocol = req.protocol;
+  const baseUrl = `${protocol}://${host}`;
+  const script = generateInstallerScript(baseUrl, WEBHOOK_SECRET);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', 'attachment; filename="install_call_monitor.ps1"');
+  res.send(script);
+});
+
+function generateInstallerScript(baseUrl, secret) {
+  return `<#
+.SYNOPSIS
+    One-click installer for Clinicea Call Monitor.
+    Installs the monitor, adds it to Windows startup, and starts it immediately.
+    Run this ONCE — after that it auto-starts on every login (hidden, no window).
+.NOTES
+    Downloaded from ${baseUrl}
+#>
+
+Write-Host ""
+Write-Host "=== Clinicea Call Monitor - Installer ===" -ForegroundColor Cyan
+Write-Host ""
+
+# ── Step 1: Create install folder ──
+$installDir = "$env:APPDATA\\ClinicaCallMonitor"
+if (!(Test-Path $installDir)) {
+    New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+}
+Write-Host "[1/4] Install folder: $installDir" -ForegroundColor Green
+
+# ── Step 2: Write the monitor script ──
+$monitorScript = @'
+$webhookUrl = "${baseUrl}/incoming_call"
+$heartbeatUrl = "${baseUrl}/heartbeat"
+$webhookSecret = "${secret}"
+
+try {
+    [void][Windows.UI.Notifications.Management.UserNotificationListener, Windows.UI.Notifications, ContentType = WindowsRuntime]
+    [void][Windows.UI.Notifications.NotificationKinds, Windows.UI.Notifications, ContentType = WindowsRuntime]
+    [void][Windows.UI.Notifications.KnownNotificationBindings, Windows.UI.Notifications, ContentType = WindowsRuntime]
+    [void][Windows.UI.Notifications.UserNotification, Windows.UI.Notifications, ContentType = WindowsRuntime]
+} catch {
+    exit 1
+}
+
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and
+    $_.GetParameters().Count -eq 1 -and
+    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation` + "`" + `1'
+})[0]
+
+function Await-AsyncOp {
+    param($AsyncOp, [Type]$ResultType)
+    $asTask = $script:asTaskGeneric.MakeGenericMethod($ResultType)
+    $netTask = $asTask.Invoke($null, @($AsyncOp))
+    $netTask.Wait(-1) | Out-Null
+    return $netTask.Result
+}
+
+$listener = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
+
+try {
+    $accessStatus = Await-AsyncOp ($listener.RequestAccessAsync()) ([Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus])
+} catch { exit 1 }
+
+if ($accessStatus -ne [Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus]::Allowed) { exit 1 }
+
+$seenIds = @{}
+$recentCalls = @{}
+$lastHeartbeat = [DateTimeOffset]::Now.ToUnixTimeSeconds() - 999
+
+while ($true) {
+    try {
+        $notifications = Await-AsyncOp ($listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)) ([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]])
+
+        foreach ($notif in $notifications) {
+            $id = $notif.Id
+            if ($seenIds.ContainsKey($id)) { continue }
+            $seenIds[$id] = $true
+
+            try { $appName = $notif.AppInfo.DisplayInfo.DisplayName } catch { continue }
+            if ($appName -notmatch "Phone Link|Your Phone|Phone") { continue }
+
+            try {
+                $binding = $notif.Notification.Visual.GetBinding([Windows.UI.Notifications.KnownNotificationBindings]::ToastGeneric)
+                if ($null -eq $binding) { continue }
+
+                $textElements = $binding.GetTextElements()
+                $allTexts = @()
+                foreach ($elem in $textElements) { $allTexts += $elem.Text }
+                $fullText = $allTexts -join " "
+
+                if ($fullText -match "incoming|call|calling|ringing|answer|decline") {
+                    $numberPart = $fullText -replace '(?i)(incoming\s*call|calling|ringing|answer|decline|voice\s*call)', ''
+                    $numberPart = $numberPart.Trim()
+                    $phone = $null
+
+                    if ($numberPart -match '(\+?[\d][\d\s\-\(\)]{7,18}[\d])') {
+                        $phone = $Matches[1] -replace '[\s\-\(\)]', ''
+                    }
+
+                    if ($phone) {
+                        $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+                        if ($recentCalls.ContainsKey($phone) -and ($now - $recentCalls[$phone]) -lt 30) { continue }
+                        $recentCalls[$phone] = $now
+
+                        $body = "From=$([uri]::EscapeDataString($phone))&CallSid=local-$now"
+                        $headers = @{ "X-Webhook-Secret" = $webhookSecret }
+                        try {
+                            Invoke-RestMethod -Uri $webhookUrl -Method POST -Body $body -ContentType "application/x-www-form-urlencoded" -Headers $headers -TimeoutSec 5 | Out-Null
+                        } catch {}
+                    }
+                }
+            } catch {}
+        }
+
+        if ($seenIds.Count -gt 1000) { $seenIds = @{} }
+        $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+        $expiredCalls = $recentCalls.Keys | Where-Object { ($now - $recentCalls[$_]) -gt 60 }
+        foreach ($key in $expiredCalls) { $recentCalls.Remove($key) }
+
+    } catch {}
+
+    $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    if (($now - $lastHeartbeat) -ge 30) {
+        try {
+            $hbHeaders = @{ "X-Webhook-Secret" = $webhookSecret }
+            Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Headers $hbHeaders -TimeoutSec 5 | Out-Null
+            $lastHeartbeat = $now
+        } catch {}
+    }
+
+    Start-Sleep -Seconds 1
+}
+'@
+
+$monitorPath = "$installDir\\call_monitor.ps1"
+$monitorScript | Out-File -FilePath $monitorPath -Encoding UTF8 -Force
+Write-Host "[2/4] Monitor script saved" -ForegroundColor Green
+
+# ── Step 3: Create silent VBS launcher + add to Startup ──
+$vbsContent = @"
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$monitorPath""", 0, False
+"@
+
+$vbsPath = "$installDir\\start_monitor.vbs"
+$vbsContent | Out-File -FilePath $vbsPath -Encoding ASCII -Force
+
+$startupFolder = [Environment]::GetFolderPath('Startup')
+$startupLink = "$startupFolder\\ClinicaCallMonitor.vbs"
+Copy-Item -Path $vbsPath -Destination $startupLink -Force
+Write-Host "[3/4] Added to Windows startup" -ForegroundColor Green
+
+# ── Step 4: Start monitoring now ──
+Start-Process -FilePath "wscript.exe" -ArgumentList """$vbsPath""" -WindowStyle Hidden
+Write-Host "[4/4] Monitor started!" -ForegroundColor Green
+
+Write-Host ""
+Write-Host "Installation complete!" -ForegroundColor Cyan
+Write-Host "The monitor is now running in the background and will auto-start on login." -ForegroundColor Gray
+Write-Host "Dashboard: ${baseUrl}" -ForegroundColor Gray
+Write-Host ""
+Read-Host "Press Enter to close this window"
+`;
+}
 
 // Protected dashboard - serve static files behind auth
 app.get('/', requireAuth, (req, res, next) => next());
