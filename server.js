@@ -590,15 +590,42 @@ async function findPatientByPhone(phone) {
   const syncDate = thirtyDaysAgo.toISOString().split('.')[0];
   const data = await cliniceaFetch(`/api/v2/appointments/getChanges?lastSyncDTime=${syncDate}&pageNo=1&pageSize=100`);
   if (!Array.isArray(data)) return null;
-  // Match by phone number (try with and without +)
-  const cleanPhone = phone.replace(/[\s\-]/g, '');
-  const match = data.find(a =>
-    a.AppointmentWithPhone === cleanPhone ||
-    a.PatientMobile === cleanPhone ||
-    a.AppointmentWithPhone === cleanPhone.replace('+', '') ||
-    a.PatientMobile === cleanPhone.replace('+', '')
-  );
-  if (!match) return null;
+  // Normalize phone: strip spaces/dashes, build all possible variants
+  const cleanPhone = phone.replace(/[\s\-\(\)]/g, '');
+  // Generate all variants: +923001234567, 923001234567, 03001234567, 3001234567
+  const variants = new Set();
+  variants.add(cleanPhone);
+  variants.add(cleanPhone.replace('+', ''));
+  // If starts with 0 (local PK format like 03216315551), add 92 version
+  if (cleanPhone.startsWith('0')) {
+    variants.add('92' + cleanPhone.substring(1));       // 923216315551
+    variants.add('+92' + cleanPhone.substring(1));      // +923216315551
+  }
+  // If starts with +92, add local format
+  if (cleanPhone.startsWith('+92')) {
+    variants.add('0' + cleanPhone.substring(3));        // 03216315551
+    variants.add(cleanPhone.substring(1));              // 923216315551
+  }
+  // If starts with 92 (no +), add local and + format
+  if (cleanPhone.startsWith('92') && !cleanPhone.startsWith('+')) {
+    variants.add('+' + cleanPhone);                     // +923216315551
+    variants.add('0' + cleanPhone.substring(2));        // 03216315551
+  }
+
+  logEvent('info', 'Looking up phone: ' + cleanPhone, 'Variants: ' + [...variants].join(', '));
+
+  const match = data.find(a => {
+    const apiPhone1 = (a.AppointmentWithPhone || '').replace(/[\s\-\(\)]/g, '');
+    const apiPhone2 = (a.PatientMobile || '').replace(/[\s\-\(\)]/g, '');
+    return variants.has(apiPhone1) || variants.has(apiPhone2);
+  });
+
+  if (!match) {
+    // Log why we couldn't find a match
+    const apiPhones = data.map(a => a.AppointmentWithPhone || a.PatientMobile).filter(Boolean).slice(0, 10);
+    logEvent('warn', 'No patient found for ' + cleanPhone, 'API phones sample: ' + apiPhones.join(', '));
+    return null;
+  }
 
   // Log all name-related fields for debugging
   const nameFields = {};
