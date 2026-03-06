@@ -248,63 +248,55 @@ app.get('/api/monitor-status', requireAuth, (req, res) => {
   res.json({ alive: monitorAlive });
 });
 
-// --- Download call monitor installer (pre-configured) ---
+// --- Download call monitor installer (pre-configured .bat) ---
 app.get('/download/call-monitor', requireAuth, (req, res) => {
   const host = req.get('host');
   const protocol = req.protocol;
   const baseUrl = `${protocol}://${host}`;
-  const script = generateInstallerScript(baseUrl, WEBHOOK_SECRET);
+  const bat = generateInstallerBat(baseUrl, WEBHOOK_SECRET);
   res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', 'attachment; filename="install_call_monitor.ps1"');
-  res.send(script);
+  res.setHeader('Content-Disposition', 'attachment; filename="Install_Call_Monitor.bat"');
+  res.send(bat);
 });
 
-function generateInstallerScript(baseUrl, secret) {
-  return `<#
-.SYNOPSIS
-    One-click installer for Clinicea Call Monitor.
-    Installs the monitor, adds it to Windows startup, and starts it immediately.
-    Run this ONCE — after that it auto-starts on every login (hidden, no window).
-.NOTES
-    Downloaded from ${baseUrl}
-#>
-
-Write-Host ""
-Write-Host "=== Clinicea Call Monitor - Installer ===" -ForegroundColor Cyan
-Write-Host ""
-
-# ── Step 1: Create install folder ──
-$installDir = "$env:APPDATA\\ClinicaCallMonitor"
-if (!(Test-Path $installDir)) {
-    New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-}
-Write-Host "[1/4] Install folder: $installDir" -ForegroundColor Green
-
-# ── Step 2: Write the monitor script ──
-$monitorScript = @'
+function generateMonitorScript(baseUrl, secret) {
+  return `# Clinicea Call Monitor — Phone Link + WhatsApp
+$ErrorActionPreference = 'Continue'
 $webhookUrl = "${baseUrl}/incoming_call"
 $heartbeatUrl = "${baseUrl}/heartbeat"
 $webhookSecret = "${secret}"
+$logFile = "$env:APPDATA\\ClinicaCallMonitor\\monitor.log"
+
+function Write-Log { param([string]$Msg)
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    try { Add-Content -Path $logFile -Value "[$ts] $Msg" -ErrorAction SilentlyContinue } catch {}
+}
+
+# Trim log if > 1MB
+if (Test-Path $logFile) {
+    try { if ((Get-Item $logFile).Length -gt 1MB) { Get-Content $logFile -Tail 200 | Set-Content "$logFile.tmp"; Move-Item "$logFile.tmp" $logFile -Force } } catch {}
+}
+
+Write-Log "=== Monitor starting ==="
 
 try {
     [void][Windows.UI.Notifications.Management.UserNotificationListener, Windows.UI.Notifications, ContentType = WindowsRuntime]
     [void][Windows.UI.Notifications.NotificationKinds, Windows.UI.Notifications, ContentType = WindowsRuntime]
     [void][Windows.UI.Notifications.KnownNotificationBindings, Windows.UI.Notifications, ContentType = WindowsRuntime]
     [void][Windows.UI.Notifications.UserNotification, Windows.UI.Notifications, ContentType = WindowsRuntime]
+    Write-Log "WinRT APIs loaded"
 } catch {
+    Write-Log "FATAL: Cannot load WinRT APIs (need Windows 10 1803+): $_"
     exit 1
 }
 
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
-
 $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
-    $_.Name -eq 'AsTask' -and
-    $_.GetParameters().Count -eq 1 -and
-    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation` + "`" + `1'
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1'
 })[0]
 
-function Await-AsyncOp {
-    param($AsyncOp, [Type]$ResultType)
+function Await-AsyncOp { param($AsyncOp, [Type]$ResultType)
     $asTask = $script:asTaskGeneric.MakeGenericMethod($ResultType)
     $netTask = $asTask.Invoke($null, @($AsyncOp))
     $netTask.Wait(-1) | Out-Null
@@ -313,232 +305,149 @@ function Await-AsyncOp {
 
 $listener = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
 
-try {
-    $accessStatus = Await-AsyncOp ($listener.RequestAccessAsync()) ([Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus])
-} catch { exit 1 }
+$accessOk = $false
+for ($i = 1; $i -le 3; $i++) {
+    try {
+        $status = Await-AsyncOp ($listener.RequestAccessAsync()) ([Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus])
+        if ($status -eq [Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus]::Allowed) {
+            $accessOk = $true; Write-Log "Notification access granted"; break
+        }
+        Write-Log "Access denied (attempt $i): $status"
+    } catch { Write-Log "Access error (attempt $i): $_" }
+    Start-Sleep -Seconds 5
+}
+if (-not $accessOk) { Write-Log "FATAL: Notification access denied. Enable at Settings > Privacy > Notifications"; exit 1 }
 
-if ($accessStatus -ne [Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus]::Allowed) { exit 1 }
-
-$seenIds = @{}
-$recentCalls = @{}
+$seenIds = @{}; $recentCalls = @{}
 $lastHeartbeat = [DateTimeOffset]::Now.ToUnixTimeSeconds() - 999
+Write-Log "Monitoring calls (Phone Link + WhatsApp)..."
 
 while ($true) {
     try {
         $notifications = Await-AsyncOp ($listener.GetNotificationsAsync([Windows.UI.Notifications.NotificationKinds]::Toast)) ([System.Collections.Generic.IReadOnlyList[Windows.UI.Notifications.UserNotification]])
-
         foreach ($notif in $notifications) {
-            $id = $notif.Id
-            if ($seenIds.ContainsKey($id)) { continue }
-            $seenIds[$id] = $true
-
+            $nid = $notif.Id
+            if ($seenIds.ContainsKey($nid)) { continue }
+            $seenIds[$nid] = $true
             try { $appName = $notif.AppInfo.DisplayInfo.DisplayName } catch { continue }
-            if ($appName -notmatch "Phone Link|Your Phone|Phone") { continue }
-
+            if ($appName -notmatch "Phone Link|Your Phone|Phone|WhatsApp") { continue }
             try {
                 $binding = $notif.Notification.Visual.GetBinding([Windows.UI.Notifications.KnownNotificationBindings]::ToastGeneric)
                 if ($null -eq $binding) { continue }
-
                 $textElements = $binding.GetTextElements()
-                $allTexts = @()
-                foreach ($elem in $textElements) { $allTexts += $elem.Text }
+                $allTexts = @(); foreach ($elem in $textElements) { $allTexts += $elem.Text }
                 $fullText = $allTexts -join " "
-
-                if ($fullText -match "incoming|call|calling|ringing|answer|decline") {
-                    $numberPart = $fullText -replace '(?i)(incoming\s*call|calling|ringing|answer|decline|voice\s*call)', ''
+                $isCall = $false
+                if ($appName -match "Phone Link|Your Phone|Phone") {
+                    $isCall = $fullText -match "incoming|call|calling|ringing|answer|decline"
+                }
+                if ($appName -match "WhatsApp") {
+                    $isCall = $fullText -match "voice call|video call|incoming|calling|ringing|audio call"
+                }
+                if ($isCall) {
+                    $numberPart = $fullText -replace '(?i)(incoming\\s*(voice\\s*|video\\s*|audio\\s*)?call|calling|ringing|answer|decline|voice\\s*call|video\\s*call|audio\\s*call)', ''
                     $numberPart = $numberPart.Trim()
                     $phone = $null
-
-                    if ($numberPart -match '(\+?[\d][\d\s\-\(\)]{7,18}[\d])') {
-                        $phone = $Matches[1] -replace '[\s\-\(\)]', ''
+                    if ($numberPart -match '(\\+?[\\d][\\d\\s\\-\\(\\)]{7,18}[\\d])') {
+                        $phone = $Matches[1] -replace '[\\s\\-\\(\\)]', ''
                     }
-
                     if ($phone) {
                         $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
                         if ($recentCalls.ContainsKey($phone) -and ($now - $recentCalls[$phone]) -lt 30) { continue }
                         $recentCalls[$phone] = $now
-
+                        Write-Log "CALL [$appName]: $phone"
                         $body = "From=$([uri]::EscapeDataString($phone))&CallSid=local-$now"
-                        $headers = @{ "X-Webhook-Secret" = $webhookSecret }
                         try {
-                            Invoke-RestMethod -Uri $webhookUrl -Method POST -Body $body -ContentType "application/x-www-form-urlencoded" -Headers $headers -TimeoutSec 5 | Out-Null
-                        } catch {}
+                            Invoke-RestMethod -Uri $webhookUrl -Method POST -Body $body -ContentType "application/x-www-form-urlencoded" -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 5 | Out-Null
+                            Write-Log "Webhook sent OK"
+                        } catch { Write-Log "Webhook error: $_" }
+                    } else {
+                        Write-Log "Call [$appName] no number: $fullText"
                     }
                 }
             } catch {}
         }
-
         if ($seenIds.Count -gt 1000) { $seenIds = @{} }
         $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
-        $expiredCalls = $recentCalls.Keys | Where-Object { ($now - $recentCalls[$_]) -gt 60 }
-        foreach ($key in $expiredCalls) { $recentCalls.Remove($key) }
-
-    } catch {}
+        $expired = $recentCalls.Keys | Where-Object { ($now - $recentCalls[$_]) -gt 60 }
+        foreach ($k in $expired) { $recentCalls.Remove($k) }
+    } catch { Write-Log "Error: $_" }
 
     $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
     if (($now - $lastHeartbeat) -ge 30) {
         try {
-            $hbHeaders = @{ "X-Webhook-Secret" = $webhookSecret }
-            Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Headers $hbHeaders -TimeoutSec 5 | Out-Null
+            Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 5 | Out-Null
             $lastHeartbeat = $now
         } catch {}
     }
-
     Start-Sleep -Seconds 1
 }
-'@
-
-$monitorPath = "$installDir\\call_monitor.ps1"
-$monitorScript | Out-File -FilePath $monitorPath -Encoding UTF8 -Force
-Write-Host "[2/4] Monitor script saved" -ForegroundColor Green
-
-# ── Step 3: Create silent VBS launcher + add to Startup ──
-$vbsContent = @"
-Set objShell = CreateObject("WScript.Shell")
-objShell.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$monitorPath""", 0, False
-"@
-
-$vbsPath = "$installDir\\start_monitor.vbs"
-$vbsContent | Out-File -FilePath $vbsPath -Encoding ASCII -Force
-
-$startupFolder = [Environment]::GetFolderPath('Startup')
-$startupLink = "$startupFolder\\ClinicaCallMonitor.vbs"
-Copy-Item -Path $vbsPath -Destination $startupLink -Force
-Write-Host "[3/4] Added to Windows startup" -ForegroundColor Green
-
-# ── Step 4: Start monitoring now ──
-Start-Process -FilePath "wscript.exe" -ArgumentList """$vbsPath""" -WindowStyle Hidden
-Write-Host "[4/4] Monitor started!" -ForegroundColor Green
-
-Write-Host ""
-Write-Host "Installation complete!" -ForegroundColor Cyan
-Write-Host "The monitor is now running in the background and will auto-start on login." -ForegroundColor Gray
-Write-Host "Dashboard: ${baseUrl}" -ForegroundColor Gray
-Write-Host ""
-Read-Host "Press Enter to close this window"
 `;
 }
 
-// --- Download Mac call monitor installer ---
-app.get('/download/call-monitor-mac', requireAuth, (req, res) => {
-  const host = req.get('host');
-  const protocol = req.protocol;
-  const baseUrl = `${protocol}://${host}`;
-  const script = generateMacInstallerScript(baseUrl, WEBHOOK_SECRET);
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', 'attachment; filename="install_call_monitor.sh"');
-  res.send(script);
-});
+function generateInstallerBat(baseUrl, secret) {
+  const monitorScript = generateMonitorScript(baseUrl, secret);
+  const monitorB64 = Buffer.from(monitorScript, 'utf8').toString('base64');
+  const monitorLines = monitorB64.match(/.{1,76}/g) || [];
 
-function generateMacInstallerScript(baseUrl, secret) {
-  // Use string concatenation to avoid template literal conflicts with bash ${}
-  var s = '#!/bin/bash\n';
-  s += '# Clinicea Call Monitor - Mac Installer\n';
-  s += '# One-click install: monitors iPhone calls via macOS Continuity\n\n';
-  s += 'WEBHOOK_URL="' + baseUrl + '/incoming_call"\n';
-  s += 'HEARTBEAT_URL="' + baseUrl + '/heartbeat"\n';
-  s += 'WEBHOOK_SECRET="' + secret + '"\n';
-  s += 'INSTALL_DIR="$HOME/.clinicea-call-monitor"\n';
-  s += 'PLIST_NAME="com.clinicea.callmonitor"\n\n';
-  s += 'echo ""\n';
-  s += 'echo "=== Clinicea Call Monitor - Mac Installer ==="\n';
-  s += 'echo ""\n\n';
-  s += 'mkdir -p "$INSTALL_DIR"\n';
-  s += 'echo "[1/4] Install folder: $INSTALL_DIR"\n\n';
-  s += "cat > \"$INSTALL_DIR/call_monitor.sh\" << 'MONITOR_SCRIPT'\n";
-  s += '#!/bin/bash\n';
-  s += 'WEBHOOK_URL="PLACEHOLDER_WEBHOOK"\n';
-  s += 'HEARTBEAT_URL="PLACEHOLDER_HEARTBEAT"\n';
-  s += 'WEBHOOK_SECRET="PLACEHOLDER_SECRET"\n\n';
-  s += 'SEEN_FILE="/tmp/clinicea_seen_calls"\n';
-  s += 'HEARTBEAT_FILE="/tmp/clinicea_last_heartbeat"\n';
-  s += 'touch "$SEEN_FILE"\n';
-  s += 'echo "0" > "$HEARTBEAT_FILE"\n\n';
-  s += 'while true; do\n';
-  s += '    LOG_OUTPUT=$(log show --last 2s --predicate \'(\n';
-  s += '        process == "callservicesd" AND message CONTAINS "IncomingCallRequest"\n';
-  s += '    ) OR (\n';
-  s += '        process == "FaceTime" AND message CONTAINS "incoming"\n';
-  s += '    ) OR (\n';
-  s += '        process == "CommCenter" AND message CONTAINS "IncomingCall"\n';
-  s += '    ) OR (\n';
-  s += '        process == "telephonyutilities" AND message CONTAINS "incoming"\n';
-  s += "    )' 2>/dev/null)\n\n";
-  s += '    if [ -n "$LOG_OUTPUT" ]; then\n';
-  s += '        PHONES=$(echo "$LOG_OUTPUT" | grep -oE \'\\+?[0-9][0-9 \\-\\(\\)]{7,18}[0-9]\' | sed \'s/[[:space:]\\-()]//g\' | sort -u)\n';
-  s += '        for PHONE in $PHONES; do\n';
-  s += '            if [ ${#PHONE} -lt 7 ]; then continue; fi\n';
-  s += '            NOW=$(date +%s)\n';
-  s += '            if grep -q "$PHONE:$((NOW/30))" "$SEEN_FILE" 2>/dev/null; then continue; fi\n';
-  s += '            echo "$PHONE:$((NOW/30))" >> "$SEEN_FILE"\n';
-  s += '            curl -s -X POST "$WEBHOOK_URL" \\\n';
-  s += '                -H "X-Webhook-Secret: $WEBHOOK_SECRET" \\\n';
-  s += '                -H "Content-Type: application/x-www-form-urlencoded" \\\n';
-  s += '                -d "From=$PHONE&CallSid=mac-$NOW" \\\n';
-  s += '                --max-time 5 > /dev/null 2>&1\n';
-  s += '        done\n';
-  s += '    fi\n\n';
-  s += '    if [ $(wc -l < "$SEEN_FILE" 2>/dev/null || echo 0) -gt 500 ]; then\n';
-  s += '        tail -100 "$SEEN_FILE" > "$SEEN_FILE.tmp" && mv "$SEEN_FILE.tmp" "$SEEN_FILE"\n';
-  s += '    fi\n\n';
-  s += '    NOW=$(date +%s)\n';
-  s += '    LAST_HB=$(cat "$HEARTBEAT_FILE" 2>/dev/null || echo "0")\n';
-  s += '    if [ $((NOW - LAST_HB)) -ge 30 ]; then\n';
-  s += '        curl -s -X POST "$HEARTBEAT_URL" \\\n';
-  s += '            -H "X-Webhook-Secret: $WEBHOOK_SECRET" \\\n';
-  s += '            --max-time 5 > /dev/null 2>&1\n';
-  s += '        echo "$NOW" > "$HEARTBEAT_FILE"\n';
-  s += '    fi\n\n';
-  s += '    sleep 2\n';
-  s += 'done\n';
-  s += 'MONITOR_SCRIPT\n\n';
-  s += 'sed -i \'\' "s|PLACEHOLDER_WEBHOOK|$WEBHOOK_URL|g" "$INSTALL_DIR/call_monitor.sh"\n';
-  s += 'sed -i \'\' "s|PLACEHOLDER_HEARTBEAT|$HEARTBEAT_URL|g" "$INSTALL_DIR/call_monitor.sh"\n';
-  s += 'sed -i \'\' "s|PLACEHOLDER_SECRET|$WEBHOOK_SECRET|g" "$INSTALL_DIR/call_monitor.sh"\n';
-  s += 'chmod +x "$INSTALL_DIR/call_monitor.sh"\n';
-  s += 'echo "[2/4] Monitor script saved"\n\n';
-  s += 'PLIST_DIR="$HOME/Library/LaunchAgents"\n';
-  s += 'mkdir -p "$PLIST_DIR"\n\n';
-  s += 'cat > "$PLIST_DIR/$PLIST_NAME.plist" << PLIST_EOF\n';
-  s += '<?xml version="1.0" encoding="UTF-8"?>\n';
-  s += '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n';
-  s += '<plist version="1.0">\n';
-  s += '<dict>\n';
-  s += '    <key>Label</key>\n';
-  s += '    <string>com.clinicea.callmonitor</string>\n';
-  s += '    <key>ProgramArguments</key>\n';
-  s += '    <array>\n';
-  s += '        <string>/bin/bash</string>\n';
-  s += '        <string>$INSTALL_DIR/call_monitor.sh</string>\n';
-  s += '    </array>\n';
-  s += '    <key>RunAtLoad</key>\n';
-  s += '    <true/>\n';
-  s += '    <key>KeepAlive</key>\n';
-  s += '    <true/>\n';
-  s += '    <key>StandardOutPath</key>\n';
-  s += '    <string>$INSTALL_DIR/monitor.log</string>\n';
-  s += '    <key>StandardErrorPath</key>\n';
-  s += '    <string>$INSTALL_DIR/monitor_error.log</string>\n';
-  s += '</dict>\n';
-  s += '</plist>\n';
-  s += 'PLIST_EOF\n\n';
-  s += 'echo "[3/4] Added to macOS LaunchAgents (auto-start on login)"\n\n';
-  s += 'launchctl unload "$PLIST_DIR/$PLIST_NAME.plist" 2>/dev/null\n';
-  s += 'launchctl load "$PLIST_DIR/$PLIST_NAME.plist"\n';
-  s += 'echo "[4/4] Monitor started!"\n\n';
-  s += 'echo ""\n';
-  s += 'echo "Installation complete!"\n';
-  s += 'echo "The monitor is running in the background and will auto-start on login."\n';
-  s += 'echo "Dashboard: ' + baseUrl + '"\n';
-  s += 'echo ""\n';
-  s += 'echo "IMPORTANT: You may need to grant Terminal Full Disk Access:"\n';
-  s += 'echo "  System Settings > Privacy & Security > Full Disk Access > Add Terminal"\n';
-  s += 'echo ""\n';
-  s += 'echo "To check logs:  tail -f ~/.clinicea-call-monitor/monitor.log"\n';
-  s += 'echo "To stop:        launchctl unload ~/Library/LaunchAgents/com.clinicea.callmonitor.plist"\n';
-  s += 'echo "To uninstall:   launchctl unload ~/Library/LaunchAgents/com.clinicea.callmonitor.plist && rm -rf ~/.clinicea-call-monitor ~/Library/LaunchAgents/com.clinicea.callmonitor.plist"\n';
-  s += 'echo ""\n';
-  return s;
+  // VBS launcher that finds PS1 via %APPDATA%
+  const vbsScript = 'Set ws = CreateObject("WScript.Shell")\r\ndir = ws.ExpandEnvironmentStrings("%APPDATA%") & "\\ClinicaCallMonitor"\r\nws.Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & dir & "\\call_monitor.ps1""", 0, False\r\n';
+  const vbsB64 = Buffer.from(vbsScript, 'utf8').toString('base64');
+  const vbsLines = vbsB64.match(/.{1,76}/g) || [];
+
+  let bat = '@echo off\r\n';
+  bat += 'title Clinicea Call Monitor - Installer\r\n';
+  bat += 'echo.\r\n';
+  bat += 'echo  === Clinicea Call Monitor - Installer ===\r\n';
+  bat += 'echo.\r\n\r\n';
+
+  bat += 'set "DIR=%APPDATA%\\ClinicaCallMonitor"\r\n';
+  bat += 'if not exist "%DIR%" mkdir "%DIR%"\r\n';
+  bat += 'echo  [1/4] Install folder: %DIR%\r\n\r\n';
+
+  // Write monitor PS1 via certutil base64 decode
+  bat += '> "%TEMP%\\cm_b64.tmp" (\r\n';
+  bat += 'echo -----BEGIN CERTIFICATE-----\r\n';
+  for (const line of monitorLines) {
+    bat += 'echo ' + line + '\r\n';
+  }
+  bat += 'echo -----END CERTIFICATE-----\r\n';
+  bat += ')\r\n';
+  bat += 'certutil -decode "%TEMP%\\cm_b64.tmp" "%DIR%\\call_monitor.ps1" >nul 2>&1\r\n';
+  bat += 'del "%TEMP%\\cm_b64.tmp" 2>nul\r\n';
+  bat += 'echo  [2/4] Monitor script installed\r\n\r\n';
+
+  // Write VBS launcher via certutil
+  bat += '> "%TEMP%\\vbs_b64.tmp" (\r\n';
+  bat += 'echo -----BEGIN CERTIFICATE-----\r\n';
+  for (const line of vbsLines) {
+    bat += 'echo ' + line + '\r\n';
+  }
+  bat += 'echo -----END CERTIFICATE-----\r\n';
+  bat += ')\r\n';
+  bat += 'certutil -decode "%TEMP%\\vbs_b64.tmp" "%DIR%\\start_monitor.vbs" >nul 2>&1\r\n';
+  bat += 'del "%TEMP%\\vbs_b64.tmp" 2>nul\r\n\r\n';
+
+  // Copy VBS to Windows Startup
+  bat += 'copy /Y "%DIR%\\start_monitor.vbs" "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\ClinicaCallMonitor.vbs" >nul\r\n';
+  bat += 'echo  [3/4] Added to Windows startup (auto-runs on login)\r\n\r\n';
+
+  // Start now
+  bat += 'start "" wscript.exe "%DIR%\\start_monitor.vbs"\r\n';
+  bat += 'echo  [4/4] Monitor started!\r\n\r\n';
+
+  bat += 'echo.\r\n';
+  bat += 'echo  Installation complete!\r\n';
+  bat += 'echo  The monitor runs silently in the background.\r\n';
+  bat += 'echo  It auto-starts every time you log into Windows.\r\n';
+  bat += 'echo  Detects: Phone Link calls + WhatsApp calls\r\n';
+  bat += 'echo.\r\n';
+  bat += 'echo  Dashboard: ' + baseUrl + '\r\n';
+  bat += 'echo  Log file:  %DIR%\\monitor.log\r\n';
+  bat += 'echo.\r\n';
+  bat += 'pause\r\n';
+
+  return bat;
 }
 
 // Protected dashboard - serve static files behind auth
