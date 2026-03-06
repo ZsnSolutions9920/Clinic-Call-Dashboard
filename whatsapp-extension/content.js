@@ -147,8 +147,9 @@
 
   // Open a chat — we already have the sidebar row element, just need to click it right
   async function openChatByElement(element, chatName) {
-    const prevHeader = document.querySelector('#main header span[title]');
-    const prevName = prevHeader ? prevHeader.getAttribute('title') : null;
+    // Remember what was open before
+    const prevInfo = getCurrentChatInfo();
+    const prevName = prevInfo.name;
 
     // Collect every clickable thing inside the row
     const candidates = [];
@@ -188,10 +189,12 @@
       await sleep(1500);
 
       // Check if a different chat opened
-      const header = document.querySelector('#main header span[title]');
-      const newName = header ? header.getAttribute('title') : null;
-      if (header && newName && newName !== prevName) {
-        console.log('[WA Bot] Opened chat:', newName, '(click target #' + i + ')');
+      const nowInfo = getCurrentChatInfo();
+      const composeBox = document.querySelector('#main footer [contenteditable="true"]') ||
+                         document.querySelector('[data-tab="10"]');
+      // Success if: name changed, or compose box appeared, or any header exists when none did before
+      if ((nowInfo.name && nowInfo.name !== prevName) || (composeBox && !prevName)) {
+        console.log('[WA Bot] Opened chat:', nowInfo.name || chatName, '(click target #' + i + ')');
         return true;
       }
     }
@@ -254,26 +257,33 @@
     const header = document.querySelector('#main header');
     if (!header) return { name: null, phone: null };
 
-    // Get all span[title] in header and pick the right one (skip "click here..." etc)
+    // Skip text that is clearly not a contact name
+    const skipPatterns = /click here|contact info|group info|search|last seen|online|typing|tap here/i;
+
+    // Get all span[title] in header and pick the right one
     const spans = header.querySelectorAll('span[title]');
     let name = null;
     for (const span of spans) {
-      const t = span.getAttribute('title') || '';
-      // Skip helper text
-      if (t.toLowerCase().includes('click here') || t.toLowerCase().includes('contact info') || t.toLowerCase().includes('search')) continue;
-      if (t.length > 0) {
+      const t = (span.getAttribute('title') || '').trim();
+      if (!t || skipPatterns.test(t)) continue;
+      name = t;
+      break;
+    }
+
+    // Fallback: try any non-trivial text in header that isn't a subtitle
+    if (!name) {
+      const allSpans = header.querySelectorAll('span');
+      for (const span of allSpans) {
+        const t = span.textContent.trim();
+        if (!t || t.length < 2 || skipPatterns.test(t)) continue;
+        // Skip tiny UI elements
+        const rect = span.getBoundingClientRect();
+        if (rect.height < 10) continue;
         name = t;
         break;
       }
     }
 
-    // Fallback
-    if (!name) {
-      const nameEl = header.querySelector('span[data-testid="conversation-info-header-chat-title"]');
-      name = nameEl ? nameEl.textContent.trim() : null;
-    }
-
-    // Check if name looks like a phone number
     let phone = null;
     if (name && /^\+?\d[\d\s\-]{7,}/.test(name)) {
       phone = name.replace(/[\s\-]/g, '');

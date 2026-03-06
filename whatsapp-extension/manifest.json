@@ -4,7 +4,7 @@
   "version": "1.1",
   "description": "Auto-reply WhatsApp messages with AI for Dr. Nakhoda's Skin Institute",
   "permissions": ["storage", "tabs", "activeTab"],
-  "host_permissions": ["https://web.whatsapp.com/*"],
+  "host_permissions": ["https://web.whatsapp.com/*", "https://clinicea.scalamatic.com/*", "http://localhost:*/*"],
   "content_scripts": [
     {
       "matches": ["https://web.whatsapp.com/*"],
