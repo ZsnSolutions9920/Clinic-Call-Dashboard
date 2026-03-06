@@ -769,6 +769,12 @@ app.get('/api/patient-profile/:phone', requireAuth, async (req, res) => {
       cliniceaFetch(`/api/v2/bills/getBillsByPatient?patientID=${patient.patientID}&billStatus=0&pageNo=1&pageSize=50`)
     ]);
 
+    console.log(`\n=== PATIENT PROFILE: ${phone} ===`);
+    console.log('Patient Details:', JSON.stringify(details, null, 2));
+    console.log('Appointments (' + (Array.isArray(appointments) ? appointments.length : 0) + '):', JSON.stringify(appointments, null, 2));
+    console.log('Bills (' + (Array.isArray(bills) ? bills.length : 0) + '):', JSON.stringify(bills, null, 2));
+    console.log('=== END PROFILE ===\n');
+
     return res.json({
       patient: details,
       appointments: Array.isArray(appointments) ? appointments : [],
