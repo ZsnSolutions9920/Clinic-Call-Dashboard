@@ -153,9 +153,18 @@ function requireWebhookSecret(req, res, next) {
   next();
 }
 
+// Normalize Pakistani phone numbers to +92 format
+function normalizePKPhone(phone) {
+  const clean = phone.replace(/[\s\-\(\)]/g, '');
+  if (clean.startsWith('03') && clean.length === 11) return '+92' + clean.substring(1);
+  if (clean.startsWith('92') && !clean.startsWith('+') && clean.length === 12) return '+' + clean;
+  return clean;
+}
+
 // Call webhook - secured with WEBHOOK_SECRET
 app.post('/incoming_call', requireWebhookSecret, (req, res) => {
-  const caller = req.body.From || 'Unknown';
+  const rawCaller = req.body.From || 'Unknown';
+  const caller = rawCaller !== 'Unknown' ? normalizePKPhone(rawCaller) : rawCaller;
   const callSid = req.body.CallSid || '';
 
   // Build Clinicea patient lookup URL
