@@ -621,11 +621,9 @@ async function findPatientByPhone(phone) {
   });
 
   if (!match) {
-    // Fallback: search patient directly by phone number
-    logEvent('info', 'No appointment match, trying patient search for ' + cleanPhone);
-    const searchResult = await searchPatientByPhone(cleanPhone, variants);
-    if (searchResult) return searchResult;
-    logEvent('warn', 'No patient found for ' + cleanPhone);
+    // Log why we couldn't find a match
+    const apiPhones = data.map(a => a.AppointmentWithPhone || a.PatientMobile).filter(Boolean).slice(0, 10);
+    logEvent('warn', 'No patient found for ' + cleanPhone, 'API phones sample: ' + apiPhones.join(', '));
     return null;
   }
 
@@ -644,25 +642,6 @@ async function findPatientByPhone(phone) {
     patientName = [first, last].filter(Boolean).join(' ') || null;
   }
   return { patientID: match.PatientID, patientName };
-}
-
-// Search patient by phone using Clinicea patient search API
-async function searchPatientByPhone(cleanPhone, variants) {
-  // Try each variant as a search term
-  for (const variant of variants) {
-    try {
-      const data = await cliniceaFetch(`/api/v2/patients/getPatientsBySearch?searchTerm=${encodeURIComponent(variant)}&pageNo=1&pageSize=5`);
-      if (Array.isArray(data) && data.length > 0) {
-        const patient = data[0];
-        const patientName = patient.PatientName || [patient.PatientFirstName, patient.PatientLastName].filter(Boolean).join(' ') || null;
-        logEvent('info', 'Patient found via search: ' + (patientName || 'unnamed'), variant);
-        return { patientID: patient.PatientID || patient.PatientId, patientName };
-      }
-    } catch (err) {
-      logEvent('warn', 'Patient search failed for ' + variant, err.message);
-    }
-  }
-  return null;
 }
 
 async function getNextAppointmentForPatient(patientID) {
