@@ -433,7 +433,7 @@
       } catch (e) { setMonitorStatus(false); }
     }
     checkMonitorStatus();
-    setInterval(checkMonitorStatus, 30000);
+    setInterval(checkMonitorStatus, 15000);
 
     // Patient info updates (arrives after call, once API responds)
     const patientNameBanner = document.getElementById('patientNameBanner');

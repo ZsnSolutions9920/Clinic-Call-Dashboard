@@ -193,18 +193,28 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
 
 // --- Monitor Heartbeat ---
 let lastHeartbeat = 0;
+let monitorAlive = false;
 
 app.post('/heartbeat', requireWebhookSecret, (req, res) => {
-  const wasDown = (Date.now() - lastHeartbeat) > 60000;
+  const wasDown = !monitorAlive;
   lastHeartbeat = Date.now();
+  monitorAlive = true;
   io.emit('monitor_status', { alive: true });
   if (wasDown) logEvent('info', 'Call monitor connected (heartbeat received)');
   res.json({ status: 'ok' });
 });
 
+// Check every 15s if monitor went stale — proactively push "disconnected"
+setInterval(() => {
+  if (monitorAlive && (Date.now() - lastHeartbeat) > 45000) {
+    monitorAlive = false;
+    io.emit('monitor_status', { alive: false });
+    logEvent('warn', 'Call monitor disconnected (no heartbeat for 45s)');
+  }
+}, 15000);
+
 app.get('/api/monitor-status', requireAuth, (req, res) => {
-  const alive = (Date.now() - lastHeartbeat) < 60000; // alive if heartbeat within 60s
-  res.json({ alive });
+  res.json({ alive: monitorAlive });
 });
 
 // --- Download call monitor installer (pre-configured) ---
