@@ -31,45 +31,92 @@
   // Find all unread chat elements in the sidebar
   function findUnreadChats() {
     const unread = [];
-    // Get all chat list items
-    const chatRows = document.querySelectorAll('#pane-side [role="listitem"], #pane-side [data-testid="cell-frame-container"]');
+    const pane = document.querySelector('#pane-side');
+    if (!pane) {
+      console.log('[WA Bot] #pane-side not found');
+      return unread;
+    }
 
-    chatRows.forEach(row => {
-      // Look for unread count badge - WhatsApp uses various selectors
-      const badge = row.querySelector('[data-testid="icon-unread-count"]') ||
-                    row.querySelector('span.x1rg5ohu.x1eqbgkl') || // unread count span
-                    row.querySelector('[aria-label*="unread message"]');
+    // Strategy: find ALL small spans inside the chat list that contain just a number
+    // These are the unread count badges (green circles with numbers like "1", "5", "47")
+    const allSpans = pane.querySelectorAll('span');
+    const badgeSpans = [];
 
-      if (!badge) return;
+    allSpans.forEach(span => {
+      const text = span.textContent.trim();
+      // Must be a pure number, 1-4 digits
+      if (!/^\d{1,4}$/.test(text)) return;
+      // Must be small (badge-sized) — check computed style
+      const rect = span.getBoundingClientRect();
+      if (rect.width > 50 || rect.height > 30) return;
+      if (rect.width < 5) return; // hidden
+      // Check it has a background (badges are styled circles)
+      const style = window.getComputedStyle(span);
+      const bg = style.backgroundColor;
+      // Green-ish background or any non-transparent background indicates a badge
+      if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+        badgeSpans.push(span);
+      }
+    });
 
-      // Check if it has actual unread count text (number)
-      const badgeText = badge.textContent.trim();
-      if (!badgeText || badgeText === '0') return;
+    console.log('[WA Bot] Found', badgeSpans.length, 'potential unread badges');
 
-      // Get chat name
+    badgeSpans.forEach(badge => {
+      // Walk up the DOM to find the chat row container
+      let row = badge.closest('[role="listitem"]') ||
+                badge.closest('[data-testid="cell-frame-container"]')?.parentElement ||
+                badge.closest('[tabindex="-1"]');
+
+      // If no standard container found, walk up manually to find a reasonably-sized container
+      if (!row) {
+        let el = badge.parentElement;
+        for (let i = 0; i < 15 && el && el !== pane; i++) {
+          // A chat row is typically ~60-90px tall and full width
+          const rect = el.getBoundingClientRect();
+          if (rect.height > 50 && rect.height < 120 && rect.width > 200) {
+            row = el;
+            break;
+          }
+          el = el.parentElement;
+        }
+      }
+
+      if (!row) return;
+
+      // Get chat name from the row
       const nameEl = row.querySelector('span[title]');
       const name = nameEl ? (nameEl.getAttribute('title') || nameEl.textContent.trim()) : null;
       if (!name) return;
 
-      // Skip groups (they often have special characters or multiple participants listed)
-      // We'll still include them for now - user can filter later
+      const count = parseInt(badge.textContent.trim()) || 1;
 
-      unread.push({
-        name: name,
-        element: row,
-        unreadCount: parseInt(badgeText) || 1
-      });
+      // Avoid duplicates
+      if (unread.some(u => u.name === name)) return;
+
+      unread.push({ name, element: row, unreadCount: count });
     });
+
+    if (unread.length > 0) {
+      console.log('[WA Bot] Unread chats:', unread.map(c => c.name + ' (' + c.unreadCount + ')'));
+    }
 
     return unread;
   }
 
   // Click on a chat in the sidebar to open it
   async function openChatByElement(element) {
-    // Find the clickable area
-    const clickTarget = element.querySelector('[data-testid="cell-frame-container"]') || element;
+    // Try multiple click targets
+    const clickTarget = element.querySelector('[data-testid="cell-frame-container"]') ||
+                        element.querySelector('div[tabindex]') ||
+                        element;
+
+    // Simulate a real click
+    clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await sleep(100);
+    clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    clickTarget.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     clickTarget.click();
-    await sleep(1500); // wait for chat to load
+    await sleep(2000); // wait for chat to load
 
     // Verify chat opened
     const header = document.querySelector('#main header');
@@ -215,7 +262,9 @@
     try {
       const unreadChats = findUnreadChats();
 
-      if (unreadChats.length > 0) {
+      if (unreadChats.length === 0) {
+        console.log('[WA Bot] No unread chats found this scan');
+      } else {
         console.log('[WA Bot] Found', unreadChats.length, 'unread chats:', unreadChats.map(c => c.name));
       }
 
