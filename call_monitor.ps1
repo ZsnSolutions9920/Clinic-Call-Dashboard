@@ -13,6 +13,7 @@
 $webhookUrl = "https://clinicea.scalamatic.com/incoming_call"
 $heartbeatUrl = "https://clinicea.scalamatic.com/heartbeat"
 $webhookSecret = "4b8f2c9d1e6a3f7b8c2d5e9f1a4b6c3d"
+$agentName = "agent1"  # Change this to your agent username (agent1, agent2, etc.)
 
 Write-Host ""
 Write-Host "=== Phone Link Call Monitor ===" -ForegroundColor Cyan
@@ -146,7 +147,7 @@ while ($true) {
                         Write-Host "[$ts] INCOMING CALL: $phone" -ForegroundColor White -BackgroundColor DarkGreen
 
                         # POST to webhook
-                        $body = "From=$([uri]::EscapeDataString($phone))&CallSid=local-$now"
+                        $body = "From=$([uri]::EscapeDataString($phone))&CallSid=local-$now&Agent=$([uri]::EscapeDataString($agentName))"
                         $headers = @{ "X-Webhook-Secret" = $webhookSecret }
                         try {
                             $response = Invoke-RestMethod -Uri $webhookUrl -Method POST `
@@ -192,7 +193,8 @@ while ($true) {
     if (($now - $lastHeartbeat) -ge 30) {
         try {
             $hbHeaders = @{ "X-Webhook-Secret" = $webhookSecret }
-            Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Headers $hbHeaders -TimeoutSec 5 | Out-Null
+            $hbBody = "Agent=$([uri]::EscapeDataString($agentName))"
+            Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Body $hbBody -ContentType "application/x-www-form-urlencoded" -Headers $hbHeaders -TimeoutSec 5 | Out-Null
             $lastHeartbeat = $now
         } catch {
             # Silently ignore heartbeat failures

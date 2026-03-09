@@ -1670,6 +1670,7 @@
           <div class="status-dot" id="monitorDot"></div>
           <span id="monitorText">Monitor: Unknown</span>
         </div>
+        <div class="sidebar-status" id="agentInfo" style="margin-top:4px;font-weight:600;color:rgba(255,255,255,0.8);"></div>
         <a href="/logout" class="sidebar-logout">Sign Out</a>
       </div>
     </aside>
@@ -1724,11 +1725,10 @@
       <div class="page-container" id="page-patients">
         <div class="patients-toolbar">
           <input type="text" id="patientSearch" placeholder="Search patients by name, phone, or email..." oninput="onPatientSearch()">
+          <span id="patientsCount" style="font-size:13px;color:#6c757d;margin-left:auto;"></span>
         </div>
         <div id="patientsGrid" class="patients-grid"></div>
-        <div class="load-more-wrap" id="loadMoreWrap" style="display:none;">
-          <button class="btn-load-more" id="btnLoadMore" onclick="loadMorePatients()">Load More</button>
-        </div>
+        <div id="patientsPagination" class="pagination" style="display:none;"></div>
         <div id="patientsLoading" class="empty-state" style="display:none;">
           <div class="modal-loading"><div class="spinner"></div><p>Loading patients...</p></div>
         </div>
@@ -2699,19 +2699,15 @@
     // ===== PATIENTS PAGE =====
     let patientsInitialized = false;
     let patientsPage = 1;
-    let allPatients = [];
-    let patientsHasMore = true;
     let patientsLoading = false;
     let searchTimeout = null;
 
     function onPatientSearch() {
       clearTimeout(searchTimeout);
       searchTimeout = setTimeout(() => {
-        allPatients = [];
         patientsPage = 1;
-        patientsHasMore = true;
         loadPatients(1);
-      }, 150);
+      }, 300);
     }
 
     async function loadPatients(page) {
@@ -2720,20 +2716,15 @@
 
       const search = document.getElementById('patientSearch').value.trim();
       const gridEl = document.getElementById('patientsGrid');
-      const loadMoreEl = document.getElementById('loadMoreWrap');
+      const paginationEl = document.getElementById('patientsPagination');
       const loadingEl = document.getElementById('patientsLoading');
       const emptyEl = document.getElementById('patientsEmpty');
-      const btnLoadMore = document.getElementById('btnLoadMore');
+      const countEl = document.getElementById('patientsCount');
 
-      if (page === 1) {
-        gridEl.innerHTML = '';
-        allPatients = [];
-      }
-
+      gridEl.innerHTML = '';
       loadingEl.style.display = 'block';
       emptyEl.style.display = 'none';
-      btnLoadMore.disabled = true;
-      btnLoadMore.textContent = 'Loading...';
+      paginationEl.style.display = 'none';
 
       try {
         const url = `/api/patients?page=${page}` + (search ? `&search=${encodeURIComponent(search)}` : '');
@@ -2744,16 +2735,16 @@
           loadingEl.style.display = 'none';
           emptyEl.style.display = 'block';
           emptyEl.querySelector('p').textContent = 'Error: ' + data.error;
-          loadMoreEl.style.display = 'none';
           patientsLoading = false;
           return;
         }
 
         const patients = data.patients || [];
-        patientsHasMore = data.hasMore || false;
+        const total = data.total || 0;
+        const totalPages = Math.ceil(total / 25);
         patientsPage = page;
 
-        allPatients = allPatients.concat(patients);
+        countEl.textContent = total > 0 ? total + ' patients' : '';
 
         // Render patient cards
         patients.forEach(p => {
@@ -2776,16 +2767,29 @@
 
         loadingEl.style.display = 'none';
 
-        if (allPatients.length === 0) {
+        if (patients.length === 0) {
           emptyEl.style.display = 'block';
-          loadMoreEl.style.display = 'none';
+          paginationEl.style.display = 'none';
         } else {
           emptyEl.style.display = 'none';
-          loadMoreEl.style.display = patientsHasMore ? 'block' : 'none';
+          if (totalPages > 1) {
+            let pagHtml = '';
+            pagHtml += `<button onclick="loadPatients(1)" ${patientsPage === 1 ? 'disabled' : ''}>&laquo;</button>`;
+            pagHtml += `<button onclick="loadPatients(${patientsPage - 1})" ${patientsPage === 1 ? 'disabled' : ''}>&lsaquo; Prev</button>`;
+            const startPage = Math.max(1, patientsPage - 2);
+            const endPage = Math.min(totalPages, startPage + 4);
+            for (let p = startPage; p <= endPage; p++) {
+              pagHtml += `<button onclick="loadPatients(${p})" class="${p === patientsPage ? 'active' : ''}">${p}</button>`;
+            }
+            pagHtml += `<button onclick="loadPatients(${patientsPage + 1})" ${patientsPage === totalPages ? 'disabled' : ''}>Next &rsaquo;</button>`;
+            pagHtml += `<button onclick="loadPatients(${totalPages})" ${patientsPage === totalPages ? 'disabled' : ''}>&raquo;</button>`;
+            pagHtml += `<span class="page-info">Page ${patientsPage} of ${totalPages}</span>`;
+            paginationEl.innerHTML = pagHtml;
+            paginationEl.style.display = 'flex';
+          } else {
+            paginationEl.style.display = 'none';
+          }
         }
-
-        btnLoadMore.disabled = false;
-        btnLoadMore.textContent = 'Load More';
       } catch (err) {
         loadingEl.style.display = 'none';
         emptyEl.style.display = 'block';
@@ -2794,12 +2798,6 @@
       }
 
       patientsLoading = false;
-    }
-
-    function loadMorePatients() {
-      if (patientsHasMore && !patientsLoading) {
-        loadPatients(patientsPage + 1);
-      }
     }
 
     // ===== WHATSAPP BOT =====
@@ -2909,6 +2907,14 @@
         loadWaConversations();
       }
     });
+
+    // ===== AGENT INFO =====
+    fetch('/api/me').then(r => r.json()).then(data => {
+      const el = document.getElementById('agentInfo');
+      if (data.username) {
+        el.textContent = data.role === 'admin' ? 'Admin' : data.username.charAt(0).toUpperCase() + data.username.slice(1);
+      }
+    }).catch(() => {});
 
     // ===== INITIALIZATION =====
     loadCallHistory();

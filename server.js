@@ -33,8 +33,14 @@ const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 app.set('trust proxy', 1);
 
 // --- Hardcoded Login Credentials ---
-const ADMIN_USERNAME = 'admin';
-const ADMIN_PASSWORD = 'clinicea2025';
+const USERS = {
+  admin: { password: 'clinicea2025', role: 'admin' },
+  agent1: { password: 'password1', role: 'agent' },
+  agent2: { password: 'password2', role: 'agent' },
+  agent3: { password: 'password3', role: 'agent' },
+  agent4: { password: 'password4', role: 'agent' },
+  agent5: { password: 'password5', role: 'agent' },
+};
 
 // Clinicea API configuration
 const CLINICEA_API_KEY = process.env.CLINICEA_API_KEY;
@@ -59,6 +65,7 @@ db.exec(`
 // Add patient_name and patient_id columns if missing (existing DBs)
 try { db.exec('ALTER TABLE calls ADD COLUMN patient_name TEXT'); } catch (e) { /* already exists */ }
 try { db.exec('ALTER TABLE calls ADD COLUMN patient_id TEXT'); } catch (e) { /* already exists */ }
+try { db.exec('ALTER TABLE calls ADD COLUMN agent TEXT'); } catch (e) { /* already exists */ }
 
 // One-time migration: normalize all existing 03XXX numbers to +92XXX
 const oldNumbers = db.prepare("SELECT id, caller_number FROM calls WHERE caller_number LIKE '03%' AND length(caller_number) = 11").all();
@@ -73,9 +80,6 @@ if (oldNumbers.length > 0) {
   console.log(`[MIGRATION] Normalized ${oldNumbers.length} phone numbers from 03XXX to +92XXX`);
 }
 
-const insertCall = db.prepare(
-  'INSERT INTO calls (caller_number, call_sid, clinicea_url) VALUES (?, ?, ?)'
-);
 const updateCallPatientName = db.prepare(
   'UPDATE calls SET patient_name = ? WHERE id = ?'
 );
@@ -83,10 +87,6 @@ const updateCallPatientId = db.prepare(
   'UPDATE calls SET patient_id = ? WHERE id = ?'
 );
 const PAGE_SIZE = 10;
-const countCalls = db.prepare('SELECT COUNT(*) as total FROM calls');
-const paginatedCalls = db.prepare(
-  'SELECT * FROM calls ORDER BY timestamp DESC LIMIT ? OFFSET ?'
-);
 
 // --- Server Event Log (pushed to dashboard) ---
 const eventLog = []; // last 50 events kept in memory
@@ -116,12 +116,13 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ extended: false })); // Twilio sends form-encoded
 app.use(express.json());
-app.use(session({
+const sessionMiddleware = session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
-}));
+});
+app.use(sessionMiddleware);
 
 // --- Auth ---
 function requireAuth(req, res, next) {
@@ -167,8 +168,11 @@ app.get('/login', (req, res) => {
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
-  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+  const user = USERS[username];
+  if (user && user.password === password) {
     req.session.loggedIn = true;
+    req.session.username = username;
+    req.session.role = user.role;
     return res.redirect('/');
   }
   return res.redirect('/login?error=1');
@@ -176,6 +180,10 @@ app.post('/login', (req, res) => {
 
 app.get('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
+});
+
+app.get('/api/me', requireAuth, (req, res) => {
+  res.json({ username: req.session.username, role: req.session.role });
 });
 
 // Webhook auth middleware
@@ -202,24 +210,31 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   const rawCaller = req.body.From || 'Unknown';
   const caller = rawCaller !== 'Unknown' ? normalizePKPhone(rawCaller) : rawCaller;
   const callSid = req.body.CallSid || '';
+  const agent = req.body.Agent || null;
 
   // Build Clinicea patient lookup URL
   const cliniceaUrl = `${CLINICEA_BASE_URL}?tp=pat&m=${encodeURIComponent(caller)}`;
 
-  // Log to database
-  const result = insertCall.run(caller, callSid, cliniceaUrl);
+  // Log to database with agent
+  const result = db.prepare(
+    'INSERT INTO calls (caller_number, call_sid, clinicea_url, agent) VALUES (?, ?, ?, ?)'
+  ).run(caller, callSid, cliniceaUrl, agent);
   const callId = result.lastInsertRowid;
 
-  logEvent('info', 'Incoming call: ' + caller, 'SID: ' + callSid);
+  logEvent('info', 'Incoming call: ' + caller, 'Agent: ' + (agent || 'unassigned') + ' | SID: ' + callSid);
 
-  // Push to doctor's dashboard via WebSocket
-  io.emit('incoming_call', {
+  // Push to the specific agent's room (or broadcast to admin)
+  const callEvent = {
     caller,
     callSid,
     cliniceaUrl,
     callId,
     timestamp: new Date().toISOString()
-  });
+  };
+  if (agent) {
+    io.to('agent:' + agent).emit('incoming_call', callEvent);
+  }
+  io.to('role:admin').emit('incoming_call', callEvent);
 
   // Async: look up patient name and push update to dashboard
   if (isClinicaConfigured()) {
@@ -231,7 +246,11 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
         if (patient.patientID) {
           updateCallPatientId.run(patient.patientID, callId);
         }
-        io.emit('patient_info', { caller, callId, patientName: patient.patientName, patientID: patient.patientID });
+        const patientEvent = { caller, callId, patientName: patient.patientName, patientID: patient.patientID };
+        if (agent) {
+          io.to('agent:' + agent).emit('patient_info', patientEvent);
+        }
+        io.to('role:admin').emit('patient_info', patientEvent);
         logEvent('info', 'Patient identified: ' + (patient.patientName || 'Unknown'), caller);
       }
     }).catch(() => {});
@@ -241,40 +260,53 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   res.json({ status: 'ok', caller, cliniceaUrl });
 });
 
-// --- Monitor Heartbeat ---
-let lastHeartbeat = 0;
-let monitorAlive = false;
+// --- Monitor Heartbeat (per-agent) ---
+const agentHeartbeats = {}; // { agent: { lastHeartbeat, alive } }
 
 app.post('/heartbeat', requireWebhookSecret, (req, res) => {
-  const wasDown = !monitorAlive;
-  lastHeartbeat = Date.now();
-  monitorAlive = true;
-  io.emit('monitor_status', { alive: true });
-  if (wasDown) logEvent('info', 'Call monitor connected (heartbeat received)');
+  const agent = req.body.Agent || 'default';
+  const prev = agentHeartbeats[agent] || { lastHeartbeat: 0, alive: false };
+  const wasDown = !prev.alive;
+  agentHeartbeats[agent] = { lastHeartbeat: Date.now(), alive: true };
+  io.to('agent:' + agent).emit('monitor_status', { alive: true });
+  io.to('role:admin').emit('monitor_status', { alive: true, agent });
+  if (wasDown) logEvent('info', `Call monitor connected (${agent})`);
   res.json({ status: 'ok' });
 });
 
-// Check every 15s if monitor went stale — proactively push "disconnected"
+// Check every 15s if any agent monitor went stale
 setInterval(() => {
-  if (monitorAlive && (Date.now() - lastHeartbeat) > 45000) {
-    monitorAlive = false;
-    io.emit('monitor_status', { alive: false });
-    logEvent('warn', 'Call monitor disconnected (no heartbeat for 45s)');
+  for (const [agent, state] of Object.entries(agentHeartbeats)) {
+    if (state.alive && (Date.now() - state.lastHeartbeat) > 45000) {
+      state.alive = false;
+      io.to('agent:' + agent).emit('monitor_status', { alive: false });
+      io.to('role:admin').emit('monitor_status', { alive: false, agent });
+      logEvent('warn', `Call monitor disconnected (${agent})`);
+    }
   }
 }, 15000);
 
 app.get('/api/monitor-status', requireAuth, (req, res) => {
-  res.json({ alive: monitorAlive });
+  const agent = req.session.username;
+  const isAdmin = req.session.role === 'admin';
+  if (isAdmin) {
+    // Admin sees if any monitor is alive
+    const anyAlive = Object.values(agentHeartbeats).some(s => s.alive);
+    return res.json({ alive: anyAlive, agents: agentHeartbeats });
+  }
+  const state = agentHeartbeats[agent];
+  res.json({ alive: state ? state.alive : false });
 });
 
-// --- Download call monitor installer (pre-configured .bat) ---
+// --- Download call monitor installer (pre-configured .bat, agent-specific) ---
 app.get('/download/call-monitor', requireAuth, (req, res) => {
   const host = req.get('host');
   const protocol = req.protocol;
   const baseUrl = `${protocol}://${host}`;
-  const bat = generateInstallerBat(baseUrl, WEBHOOK_SECRET);
+  const agent = req.session.username;
+  const bat = generateInstallerBat(baseUrl, WEBHOOK_SECRET, agent);
   res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', 'attachment; filename="Install_Call_Monitor.bat"');
+  res.setHeader('Content-Disposition', `attachment; filename="Install_Call_Monitor_${agent}.bat"`);
   res.send(bat);
 });
 
@@ -325,12 +357,13 @@ app.get('/download/whatsapp-extension', requireAuth, (req, res) => {
   archive.finalize();
 });
 
-function generateMonitorScript(baseUrl, secret) {
+function generateMonitorScript(baseUrl, secret, agent) {
   return `# Clinicea Call Monitor — Phone Link + WhatsApp
 $ErrorActionPreference = 'Continue'
 $webhookUrl = "${baseUrl}/incoming_call"
 $heartbeatUrl = "${baseUrl}/heartbeat"
 $webhookSecret = "${secret}"
+$agentName = "${agent}"
 $logFile = "$env:APPDATA\\ClinicaCallMonitor\\monitor.log"
 
 function Write-Log { param([string]$Msg)
@@ -422,7 +455,7 @@ while ($true) {
                         if ($recentCalls.ContainsKey($phone) -and ($now - $recentCalls[$phone]) -lt 30) { continue }
                         $recentCalls[$phone] = $now
                         Write-Log "CALL [$appName]: $phone"
-                        $body = "From=$([uri]::EscapeDataString($phone))&CallSid=local-$now"
+                        $body = "From=$([uri]::EscapeDataString($phone))&CallSid=local-$now&Agent=$([uri]::EscapeDataString($agentName))"
                         try {
                             Invoke-RestMethod -Uri $webhookUrl -Method POST -Body $body -ContentType "application/x-www-form-urlencoded" -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 5 | Out-Null
                             Write-Log "Webhook sent OK"
@@ -442,7 +475,7 @@ while ($true) {
     $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
     if (($now - $lastHeartbeat) -ge 30) {
         try {
-            Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 5 | Out-Null
+            Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Body "Agent=$([uri]::EscapeDataString($agentName))" -ContentType "application/x-www-form-urlencoded" -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 5 | Out-Null
             $lastHeartbeat = $now
         } catch {}
     }
@@ -451,8 +484,8 @@ while ($true) {
 `;
 }
 
-function generateInstallerBat(baseUrl, secret) {
-  const monitorScript = generateMonitorScript(baseUrl, secret);
+function generateInstallerBat(baseUrl, secret, agent) {
+  const monitorScript = generateMonitorScript(baseUrl, secret, agent);
   const monitorB64 = Buffer.from(monitorScript, 'utf8').toString('base64');
   const monitorLines = monitorB64.match(/.{1,76}/g) || [];
 
@@ -531,13 +564,13 @@ app.post('/api/whatsapp/incoming', async (req, res) => {
   logEvent('info', `WA message from ${chatName || phone}: ${text.substring(0, 50)}`);
 
   // Store incoming message
-  insertWaMessage.run(contactId, chatName || null, 'in', text, 'chat', 'sent');
+  insertWaMessage.run(contactId, chatName || null, 'in', text, 'chat', 'sent', null);
 
   // Get GPT reply
   const reply = await getGPTReply(contactId, text, chatName);
 
   // Store outgoing reply
-  insertWaMessage.run(contactId, chatName || null, 'out', reply, 'chat', 'sent');
+  insertWaMessage.run(contactId, chatName || null, 'out', reply, 'chat', 'sent', null);
 
   logEvent('info', `WA reply to ${chatName || phone}: ${reply.substring(0, 50)}`);
   io.emit('wa_message', { phone: contactId, chatName, direction: 'in', text, reply, timestamp: new Date().toISOString() });
@@ -581,8 +614,17 @@ app.get('/api/calls', requireAuth, (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || PAGE_SIZE));
   const offset = (page - 1) * limit;
-  const { total } = countCalls.get();
-  const calls = paginatedCalls.all(limit, offset);
+  const isAdmin = req.session.role === 'admin';
+  const agent = req.session.username;
+
+  let total, calls;
+  if (isAdmin) {
+    total = db.prepare('SELECT COUNT(*) as total FROM calls').get().total;
+    calls = db.prepare('SELECT * FROM calls ORDER BY timestamp DESC LIMIT ? OFFSET ?').all(limit, offset);
+  } else {
+    total = db.prepare('SELECT COUNT(*) as total FROM calls WHERE agent = ?').get(agent).total;
+    calls = db.prepare('SELECT * FROM calls WHERE agent = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?').all(agent, limit, offset);
+  }
   res.json({ calls, total, page, totalPages: Math.ceil(total / limit) });
 });
 
@@ -892,7 +934,7 @@ async function loadAllPatients() {
 app.get('/api/patients', requireAuth, async (req, res) => {
   const search = (req.query.search || '').trim().toLowerCase();
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = 50;
+  const pageSize = 25;
 
   if (!isClinicaConfigured()) {
     return res.json({ error: 'Clinicea API not configured', patients: [], total: 0 });
@@ -1034,8 +1076,10 @@ db.exec(`
   )
 `);
 
+try { db.exec('ALTER TABLE wa_messages ADD COLUMN agent TEXT'); } catch (e) { /* already exists */ }
+
 const insertWaMessage = db.prepare(
-  'INSERT INTO wa_messages (phone, chat_name, direction, message, message_type, status) VALUES (?, ?, ?, ?, ?, ?)'
+  'INSERT INTO wa_messages (phone, chat_name, direction, message, message_type, status, agent) VALUES (?, ?, ?, ?, ?, ?, ?)'
 );
 const getPendingOutgoing = db.prepare(
   "SELECT * FROM wa_messages WHERE direction = 'out' AND status = 'pending' ORDER BY created_at ASC LIMIT 5"
@@ -1151,40 +1195,71 @@ app.post('/api/whatsapp/send', requireAuth, (req, res) => {
   const { phone, message } = req.body;
   if (!phone || !message) return res.json({ error: 'phone and message required' });
 
-  insertWaMessage.run(phone, null, 'out', message, 'chat', 'pending');
-  logEvent('info', `WA manual message queued for ${phone}`);
+  insertWaMessage.run(phone, null, 'out', message, 'chat', 'pending', req.session.username || null);
+  logEvent('info', `WA manual message queued for ${phone} by ${req.session.username}`);
   return res.json({ ok: true });
 });
 
 // Get conversation history for a phone
 app.get('/api/whatsapp/history/:phone', requireAuth, (req, res) => {
   const phone = decodeURIComponent(req.params.phone);
-  const messages = db.prepare(
-    "SELECT * FROM wa_messages WHERE phone = ? ORDER BY created_at DESC LIMIT 50"
-  ).all(phone);
+  const isAdmin = req.session.role === 'admin';
+  const agent = req.session.username;
+  let messages;
+  if (isAdmin) {
+    messages = db.prepare("SELECT * FROM wa_messages WHERE phone = ? ORDER BY created_at DESC LIMIT 50").all(phone);
+  } else {
+    messages = db.prepare("SELECT * FROM wa_messages WHERE phone = ? AND (agent = ? OR agent IS NULL) ORDER BY created_at DESC LIMIT 50").all(phone, agent);
+  }
   return res.json({ messages: messages.reverse() });
 });
 
 // Get all recent WA conversations (grouped by phone)
 app.get('/api/whatsapp/conversations', requireAuth, (req, res) => {
-  const conversations = db.prepare(`
-    SELECT phone, chat_name,
-           MAX(created_at) as last_message_at,
-           COUNT(*) as message_count,
-           (SELECT message FROM wa_messages w2 WHERE w2.phone = w1.phone ORDER BY created_at DESC LIMIT 1) as last_message
-    FROM wa_messages w1
-    GROUP BY phone
-    ORDER BY last_message_at DESC
-    LIMIT 50
-  `).all();
+  const isAdmin = req.session.role === 'admin';
+  const agent = req.session.username;
+  let conversations;
+  if (isAdmin) {
+    conversations = db.prepare(`
+      SELECT phone, chat_name,
+             MAX(created_at) as last_message_at,
+             COUNT(*) as message_count,
+             (SELECT message FROM wa_messages w2 WHERE w2.phone = w1.phone ORDER BY created_at DESC LIMIT 1) as last_message
+      FROM wa_messages w1
+      GROUP BY phone
+      ORDER BY last_message_at DESC
+      LIMIT 50
+    `).all();
+  } else {
+    conversations = db.prepare(`
+      SELECT phone, chat_name,
+             MAX(created_at) as last_message_at,
+             COUNT(*) as message_count,
+             (SELECT message FROM wa_messages w2 WHERE w2.phone = w1.phone AND (w2.agent = ? OR w2.agent IS NULL) ORDER BY created_at DESC LIMIT 1) as last_message
+      FROM wa_messages w1
+      WHERE agent = ? OR agent IS NULL
+      GROUP BY phone
+      ORDER BY last_message_at DESC
+      LIMIT 50
+    `).all(agent, agent);
+  }
   return res.json({ conversations });
 });
 
 // Get WA bot stats
 app.get('/api/whatsapp/stats', requireAuth, (req, res) => {
-  const totalMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages").get().count;
-  const todayMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages WHERE date(created_at) = date('now')").get().count;
-  const pendingMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages WHERE status = 'pending'").get().count;
+  const isAdmin = req.session.role === 'admin';
+  const agent = req.session.username;
+  let totalMessages, todayMessages, pendingMessages;
+  if (isAdmin) {
+    totalMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages").get().count;
+    todayMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages WHERE date(created_at) = date('now')").get().count;
+    pendingMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages WHERE status = 'pending'").get().count;
+  } else {
+    totalMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages WHERE agent = ? OR agent IS NULL").get(agent).count;
+    todayMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages WHERE date(created_at) = date('now') AND (agent = ? OR agent IS NULL)").get(agent).count;
+    pendingMessages = db.prepare("SELECT COUNT(*) as count FROM wa_messages WHERE status = 'pending' AND (agent = ? OR agent IS NULL)").get(agent).count;
+  }
   const totalConfirmations = db.prepare("SELECT COUNT(*) as count FROM wa_appointment_tracking WHERE confirmation_sent = 1").get().count;
   const totalReminders = db.prepare("SELECT COUNT(*) as count FROM wa_appointment_tracking WHERE reminder_sent = 1").get().count;
   const pendingConfirmations = db.prepare("SELECT COUNT(*) as count FROM wa_appointment_tracking WHERE confirmation_sent = 0 AND patient_phone IS NOT NULL AND patient_phone != ''").get().count;
@@ -1253,7 +1328,7 @@ async function syncAppointmentsAndScheduleMessages() {
       msg += `\nPlease reply "CONFIRM" to confirm or call +92-300-2105374 to reschedule. We look forward to seeing you!`;
 
       // Queue the message
-      insertWaMessage.run(apt.patient_phone, null, 'out', msg, 'confirmation', 'pending');
+      insertWaMessage.run(apt.patient_phone, null, 'out', msg, 'confirmation', 'pending', null);
       markConfirmationSent.run(apt.id);
       logEvent('info', `WA confirmation queued for ${apt.patient_name} (${apt.patient_phone})`);
     }
@@ -1284,7 +1359,7 @@ async function syncAppointmentsAndScheduleMessages() {
         if (apt.service) msg += `Treatment: ${apt.service}\n`;
         msg += `\nPlease arrive 10 minutes early. If you need to reschedule, call +92-300-2105374. See you soon!`;
 
-        insertWaMessage.run(apt.patient_phone, null, 'out', msg, 'reminder', 'pending');
+        insertWaMessage.run(apt.patient_phone, null, 'out', msg, 'reminder', 'pending', null);
         markReminderSent.run(apt.id);
         logEvent('info', `WA reminder queued for ${apt.patient_name} (${apt.patient_phone}) - appointment ${dayWord}`);
       }
@@ -1299,11 +1374,26 @@ async function syncAppointmentsAndScheduleMessages() {
 // Run appointment sync every 30 minutes
 setInterval(syncAppointmentsAndScheduleMessages, 30 * 60 * 1000);
 
-// --- Socket.IO ---
+// --- Socket.IO with session-based rooms ---
+io.engine.use(sessionMiddleware);
+
 io.on('connection', (socket) => {
-  logEvent('info', 'Dashboard client connected');
+  const session = socket.request.session;
+  const username = session && session.username;
+  const role = session && session.role;
+
+  if (username) {
+    socket.join('agent:' + username);
+    if (role === 'admin') {
+      socket.join('role:admin');
+    }
+    logEvent('info', `Dashboard client connected: ${username} (${role})`);
+  } else {
+    logEvent('info', 'Dashboard client connected (unauthenticated)');
+  }
+
   socket.on('disconnect', () => {
-    logEvent('info', 'Dashboard client disconnected');
+    logEvent('info', `Dashboard client disconnected: ${username || 'unknown'}`);
   });
 });
 
