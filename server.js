@@ -223,7 +223,7 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
 
   logEvent('info', 'Incoming call: ' + caller, 'Agent: ' + (agent || 'unassigned') + ' | SID: ' + callSid);
 
-  // Push to the specific agent's room (or broadcast to admin)
+  // Push to the specific agent's room, or broadcast to all if no agent
   const callEvent = {
     caller,
     callSid,
@@ -233,8 +233,11 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   };
   if (agent) {
     io.to('agent:' + agent).emit('incoming_call', callEvent);
+    io.to('role:admin').emit('incoming_call', callEvent);
+  } else {
+    // Old monitor without agent tag — broadcast to everyone
+    io.emit('incoming_call', callEvent);
   }
-  io.to('role:admin').emit('incoming_call', callEvent);
 
   // Async: look up patient name and push update to dashboard
   if (isClinicaConfigured()) {
@@ -249,8 +252,10 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
         const patientEvent = { caller, callId, patientName: patient.patientName, patientID: patient.patientID };
         if (agent) {
           io.to('agent:' + agent).emit('patient_info', patientEvent);
+          io.to('role:admin').emit('patient_info', patientEvent);
+        } else {
+          io.emit('patient_info', patientEvent);
         }
-        io.to('role:admin').emit('patient_info', patientEvent);
         logEvent('info', 'Patient identified: ' + (patient.patientName || 'Unknown'), caller);
       }
     }).catch(() => {});
@@ -264,24 +269,35 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
 const agentHeartbeats = {}; // { agent: { lastHeartbeat, alive } }
 
 app.post('/heartbeat', requireWebhookSecret, (req, res) => {
-  const agent = req.body.Agent || 'default';
-  const prev = agentHeartbeats[agent] || { lastHeartbeat: 0, alive: false };
+  const agent = req.body.Agent || null;
+  const key = agent || 'default';
+  const prev = agentHeartbeats[key] || { lastHeartbeat: 0, alive: false };
   const wasDown = !prev.alive;
-  agentHeartbeats[agent] = { lastHeartbeat: Date.now(), alive: true };
-  io.to('agent:' + agent).emit('monitor_status', { alive: true });
-  io.to('role:admin').emit('monitor_status', { alive: true, agent });
-  if (wasDown) logEvent('info', `Call monitor connected (${agent})`);
+  agentHeartbeats[key] = { lastHeartbeat: Date.now(), alive: true };
+  if (agent) {
+    // Agent-specific monitor — notify that agent + admin
+    io.to('agent:' + agent).emit('monitor_status', { alive: true });
+    io.to('role:admin').emit('monitor_status', { alive: true, agent });
+  } else {
+    // Old monitor without agent — broadcast to everyone
+    io.emit('monitor_status', { alive: true });
+  }
+  if (wasDown) logEvent('info', `Call monitor connected (${key})`);
   res.json({ status: 'ok' });
 });
 
 // Check every 15s if any agent monitor went stale
 setInterval(() => {
-  for (const [agent, state] of Object.entries(agentHeartbeats)) {
+  for (const [key, state] of Object.entries(agentHeartbeats)) {
     if (state.alive && (Date.now() - state.lastHeartbeat) > 45000) {
       state.alive = false;
-      io.to('agent:' + agent).emit('monitor_status', { alive: false });
-      io.to('role:admin').emit('monitor_status', { alive: false, agent });
-      logEvent('warn', `Call monitor disconnected (${agent})`);
+      if (key !== 'default') {
+        io.to('agent:' + key).emit('monitor_status', { alive: false });
+        io.to('role:admin').emit('monitor_status', { alive: false, agent: key });
+      } else {
+        io.emit('monitor_status', { alive: false });
+      }
+      logEvent('warn', `Call monitor disconnected (${key})`);
     }
   }
 }, 15000);
@@ -290,12 +306,14 @@ app.get('/api/monitor-status', requireAuth, (req, res) => {
   const agent = req.session.username;
   const isAdmin = req.session.role === 'admin';
   if (isAdmin) {
-    // Admin sees if any monitor is alive
     const anyAlive = Object.values(agentHeartbeats).some(s => s.alive);
     return res.json({ alive: anyAlive, agents: agentHeartbeats });
   }
-  const state = agentHeartbeats[agent];
-  res.json({ alive: state ? state.alive : false });
+  // Agent sees their own monitor OR the default (old untagged monitor)
+  const agentState = agentHeartbeats[agent];
+  const defaultState = agentHeartbeats['default'];
+  const alive = (agentState && agentState.alive) || (defaultState && defaultState.alive);
+  res.json({ alive: !!alive });
 });
 
 // --- Download call monitor installer (pre-configured .bat, agent-specific) ---
@@ -622,8 +640,8 @@ app.get('/api/calls', requireAuth, (req, res) => {
     total = db.prepare('SELECT COUNT(*) as total FROM calls').get().total;
     calls = db.prepare('SELECT * FROM calls ORDER BY timestamp DESC LIMIT ? OFFSET ?').all(limit, offset);
   } else {
-    total = db.prepare('SELECT COUNT(*) as total FROM calls WHERE agent = ?').get(agent).total;
-    calls = db.prepare('SELECT * FROM calls WHERE agent = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?').all(agent, limit, offset);
+    total = db.prepare('SELECT COUNT(*) as total FROM calls WHERE agent = ? OR agent IS NULL').get(agent).total;
+    calls = db.prepare('SELECT * FROM calls WHERE agent = ? OR agent IS NULL ORDER BY timestamp DESC LIMIT ? OFFSET ?').all(agent, limit, offset);
   }
   res.json({ calls, total, page, totalPages: Math.ceil(total / limit) });
 });
