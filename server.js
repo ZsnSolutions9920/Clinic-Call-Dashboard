@@ -780,7 +780,6 @@ async function findPatientByPhone(phone) {
     console.log(`[SEARCH] getChanges error:`, e.message);
   }
 
-  logEvent('warn', 'No patient found for ' + cleanPhone);
   return null;
 }
 
