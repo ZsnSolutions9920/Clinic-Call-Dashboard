@@ -19,12 +19,6 @@
     .toggle-btn.enable { background: #27ae60; color: white; }
     .toggle-btn.disable { background: #e74c3c; color: white; }
     .toggle-btn.waiting { background: #f39c12; color: white; }
-    label { font-size: 12px; font-weight: 600; color: #555; display: block; margin-bottom: 4px; }
-    input { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; margin-bottom: 8px; }
-    input:focus { outline: none; border-color: #25d366; }
-    .save-btn { width: 100%; padding: 8px; background: #1a1a2e; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; }
-    .save-btn:hover { background: #2d2d5e; }
-    .save-msg { font-size: 11px; color: #27ae60; margin-top: 6px; display: none; text-align: center; }
     .stats { font-size: 11px; color: #888; margin-top: 12px; text-align: center; }
     .help { font-size: 11px; color: #999; margin-top: 12px; line-height: 1.5; }
   </style>
@@ -40,11 +34,6 @@
       <span class="status-text" id="statusText">Checking...</span>
     </div>
     <button class="toggle-btn waiting" id="toggleBtn">Checking...</button>
-
-    <label>Server URL</label>
-    <input type="text" id="serverUrl" placeholder="https://clinicea.scalamatic.com">
-    <button class="save-btn" id="saveBtn">Save Server URL</button>
-    <div class="save-msg" id="saveMsg"></div>
 
     <div class="stats" id="stats"></div>
     <div class="help" id="helpText"></div>

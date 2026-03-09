@@ -1,5 +1,4 @@
 let currentEnabled = false;
-let waTabFound = false;
 
 function updateUI(enabled, processedCount) {
   currentEnabled = enabled;
@@ -9,7 +8,7 @@ function updateUI(enabled, processedCount) {
   btn.textContent = enabled ? 'Pause Bot' : 'Enable Bot';
   btn.className = 'toggle-btn ' + (enabled ? 'disable' : 'enable');
   if (processedCount !== undefined) {
-    document.getElementById('stats').textContent = 'Messages seen: ' + processedCount;
+    document.getElementById('stats').textContent = 'Messages processed: ' + processedCount;
   }
 }
 
@@ -32,42 +31,17 @@ function toggleBot() {
         document.getElementById('helpText').innerHTML = 'Reload the WhatsApp Web tab (Ctrl+R) so the extension can inject into it.';
         return;
       }
-      if (resp) { waTabFound = true; updateUI(!currentEnabled); }
+      if (resp) updateUI(!currentEnabled);
     });
   });
 }
 
-function saveUrl() {
-  const url = document.getElementById('serverUrl').value.trim();
-  if (!url) return;
-
-  chrome.storage.local.set({ serverUrl: url }, () => {
-    chrome.runtime.sendMessage({ type: 'SET_SERVER_URL', url: url }, () => {
-      if (chrome.runtime.lastError) { /* ignore */ }
-    });
-
-    const msg = document.getElementById('saveMsg');
-    msg.style.display = 'block';
-    msg.textContent = 'Saved: ' + url;
-    setTimeout(() => { msg.style.display = 'none'; }, 3000);
-  });
-}
-
-// Init on DOM load
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('toggleBtn').addEventListener('click', toggleBot);
-  document.getElementById('saveBtn').addEventListener('click', saveUrl);
 
-  // Load saved URL
-  chrome.storage.local.get(['serverUrl'], (result) => {
-    document.getElementById('serverUrl').value = result.serverUrl || 'https://clinicea.scalamatic.com';
-  });
-
-  // Find WhatsApp tab and get status
   chrome.tabs.query({}, (tabs) => {
     const waTab = tabs.find(t => t.url && t.url.includes('web.whatsapp.com'));
     if (waTab) {
-      waTabFound = true;
       chrome.tabs.sendMessage(waTab.id, { type: 'GET_STATUS' }, (resp) => {
         if (chrome.runtime.lastError) {
           showWaiting('Extension not loaded');
