@@ -19,7 +19,7 @@ const CLINICEA_BASE_URL = process.env.CLINICEA_BASE_URL || 'https://app.clinicea
 const SESSION_SECRET = process.env.SESSION_SECRET;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 if (!SESSION_SECRET) {
   console.error('ERROR: SESSION_SECRET is not set in .env');
@@ -1177,50 +1177,44 @@ RULES:
 
 // --- Gemini Chat Function ---
 async function getGPTReply(phone, incomingText, chatName) {
-  if (!GEMINI_API_KEY) {
+  if (!GROQ_API_KEY) {
     return "Thank you for your message. Our team will get back to you shortly. For immediate assistance, call us at +92-300-2105374.";
   }
 
   // Get conversation history for context
   const history = getConversationHistory.all(phone).reverse();
 
-  // Build Gemini contents array
-  const contents = [];
-
-  // Add conversation history
-  for (const msg of history) {
-    contents.push({
-      role: msg.direction === 'in' ? 'user' : 'model',
-      parts: [{ text: msg.message }]
-    });
-  }
-
-  // Add the new message
-  contents.push({
-    role: 'user',
-    parts: [{ text: incomingText }]
-  });
-
-  // System instruction includes clinic info + patient context
+  // Build OpenAI-compatible messages array
   let systemInstruction = CLINIC_SYSTEM_PROMPT;
   if (chatName) {
     systemInstruction += `\n\nCurrent patient's WhatsApp name: ${chatName}`;
   }
 
-  try {
-    logEvent('info', `Gemini request for ${phone}`, `${contents.length} messages, last: "${incomingText.substring(0, 50)}"`);
+  const messages = [{ role: 'system', content: systemInstruction }];
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
-    const response = await fetch(url, {
+  for (const msg of history) {
+    messages.push({
+      role: msg.direction === 'in' ? 'user' : 'assistant',
+      content: msg.message
+    });
+  }
+
+  messages.push({ role: 'user', content: incomingText });
+
+  try {
+    logEvent('info', `Groq request for ${phone}`, `${messages.length} messages, last: "${incomingText.substring(0, 50)}"`);
+
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`
+      },
       body: JSON.stringify({
-        system_instruction: { parts: [{ text: systemInstruction }] },
-        contents: contents,
-        generationConfig: {
-          maxOutputTokens: 200,
-          temperature: 0.7
-        }
+        model: 'llama-3.1-8b-instant',
+        messages: messages,
+        max_tokens: 200,
+        temperature: 0.7
       })
     });
 
@@ -1228,20 +1222,20 @@ async function getGPTReply(phone, incomingText, chatName) {
 
     if (!response.ok) {
       const errMsg = data.error?.message || JSON.stringify(data).substring(0, 200);
-      logEvent('error', 'Gemini API error', `${response.status}: ${errMsg}`);
+      logEvent('error', 'Groq API error', `${response.status}: ${errMsg}`);
       return `Sorry, I'm having trouble responding right now. Please call us directly at +92-300-2105374.`;
     }
 
-    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    const reply = data.choices?.[0]?.message?.content?.trim();
     if (!reply) {
-      logEvent('error', 'Gemini empty response', JSON.stringify(data).substring(0, 200));
+      logEvent('error', 'Groq empty response', JSON.stringify(data).substring(0, 200));
       return "Thank you for reaching out! Please call us at +92-300-2105374 for assistance.";
     }
 
-    logEvent('info', `Gemini reply for ${phone}`, reply.substring(0, 80));
+    logEvent('info', `Groq reply for ${phone}`, reply.substring(0, 80));
     return reply;
   } catch (err) {
-    logEvent('error', 'Gemini API error', err.message);
+    logEvent('error', 'Groq API error', err.message);
     return `Sorry, I'm having trouble responding right now. Please call us directly at +92-300-2105374.`;
   }
 }
