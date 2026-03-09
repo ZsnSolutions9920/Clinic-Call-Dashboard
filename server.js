@@ -7,7 +7,7 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const archiver = require('archiver');
-const OpenAI = require('openai');
+// OpenAI removed — using Google Gemini instead
 
 const app = express();
 const server = http.createServer(app);
@@ -19,15 +19,12 @@ const CLINICEA_BASE_URL = process.env.CLINICEA_BASE_URL || 'https://app.clinicea
 const SESSION_SECRET = process.env.SESSION_SECRET;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 if (!SESSION_SECRET) {
   console.error('ERROR: SESSION_SECRET is not set in .env');
   process.exit(1);
 }
-
-// --- OpenAI Setup ---
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
 // Trust Nginx proxy (needed for secure cookies behind reverse proxy)
 app.set('trust proxy', 1);
@@ -1178,48 +1175,74 @@ RULES:
 - If someone confirms an appointment reminder, say "Great! We look forward to seeing you. If you need to reschedule, just let us know."
 - Sign off messages naturally, no need for formal signatures`;
 
-// --- GPT Chat Function ---
+// --- Gemini Chat Function ---
 async function getGPTReply(phone, incomingText, chatName) {
-  if (!openai) {
+  if (!GEMINI_API_KEY) {
     return "Thank you for your message. Our team will get back to you shortly. For immediate assistance, call us at +92-300-2105374.";
   }
 
   // Get conversation history for context
   const history = getConversationHistory.all(phone).reverse();
-  const messages = [{ role: 'system', content: CLINIC_SYSTEM_PROMPT }];
 
-  // Add patient context if available
-  if (chatName) {
-    messages.push({ role: 'system', content: `Current patient's WhatsApp name: ${chatName}` });
-  }
+  // Build Gemini contents array
+  const contents = [];
 
   // Add conversation history
   for (const msg of history) {
-    messages.push({
-      role: msg.direction === 'in' ? 'user' : 'assistant',
-      content: msg.message
+    contents.push({
+      role: msg.direction === 'in' ? 'user' : 'model',
+      parts: [{ text: msg.message }]
     });
   }
 
   // Add the new message
-  messages.push({ role: 'user', content: incomingText });
+  contents.push({
+    role: 'user',
+    parts: [{ text: incomingText }]
+  });
+
+  // System instruction includes clinic info + patient context
+  let systemInstruction = CLINIC_SYSTEM_PROMPT;
+  if (chatName) {
+    systemInstruction += `\n\nCurrent patient's WhatsApp name: ${chatName}`;
+  }
 
   try {
-    logEvent('info', `GPT request for ${phone}`, `${messages.length} messages, last: "${incomingText.substring(0, 50)}"`);
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: messages,
-      max_tokens: 200,
-      temperature: 0.7
+    logEvent('info', `Gemini request for ${phone}`, `${contents.length} messages, last: "${incomingText.substring(0, 50)}"`);
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemInstruction }] },
+        contents: contents,
+        generationConfig: {
+          maxOutputTokens: 200,
+          temperature: 0.7
+        }
+      })
     });
-    const reply = completion.choices[0].message.content.trim();
-    logEvent('info', `GPT reply for ${phone}`, reply.substring(0, 80));
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      const errMsg = data.error?.message || JSON.stringify(data).substring(0, 200);
+      logEvent('error', 'Gemini API error', `${response.status}: ${errMsg}`);
+      return `Sorry, I'm having trouble responding right now. Please call us directly at +92-300-2105374.`;
+    }
+
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    if (!reply) {
+      logEvent('error', 'Gemini empty response', JSON.stringify(data).substring(0, 200));
+      return "Thank you for reaching out! Please call us at +92-300-2105374 for assistance.";
+    }
+
+    logEvent('info', `Gemini reply for ${phone}`, reply.substring(0, 80));
     return reply;
   } catch (err) {
-    const errDetail = `${err.message} | status: ${err.status || 'N/A'} | code: ${err.code || 'N/A'}`;
-    logEvent('error', 'GPT API error', errDetail);
-    // Return error info so it's visible in logs — the extension will still send this as a reply
-    return `Sorry, I'm having trouble responding right now. Please call us directly at +92-300-2105374. [Bot error: ${err.status || err.code || 'unknown'}]`;
+    logEvent('error', 'Gemini API error', err.message);
+    return `Sorry, I'm having trouble responding right now. Please call us directly at +92-300-2105374.`;
   }
 }
 
