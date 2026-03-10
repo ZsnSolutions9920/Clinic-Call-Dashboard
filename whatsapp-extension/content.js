@@ -6,6 +6,7 @@
 
   const SCAN_INTERVAL = 5000; // scan for unread chats every 5s
   const processedMessages = new Set(); // track message IDs we've already replied to
+  const repliedChats = new Map(); // chatName -> { text, time } tracks last reply per chat to prevent double-replies
   const pausedChats = new Set(); // chats where bot is paused (user is manually chatting)
   let enabled = true;
   let busy = false; // prevent overlapping operations
@@ -312,17 +313,26 @@
         const messages = getLastIncomingMessages();
         if (messages.length === 0) continue;
 
-        // Reply to ALL unread incoming messages we haven't processed yet
-        // (get the last few and check which ones are new)
+        // Take the latest incoming message
+        const lastMsg = messages[messages.length - 1];
+
+        // Check if we already replied to this exact message in this chat
+        const lastReply = repliedChats.get(chat.name);
+        if (lastReply && lastReply.text === lastMsg.text && (Date.now() - lastReply.time) < 120000) {
+          console.log('[WA Bot] Already replied to this message in', chat.name, '- skipping');
+          // Mark all messages as processed so DOM ID changes don't trip us up
+          messages.forEach(m => processedMessages.add(m.id));
+          continue;
+        }
+
+        // Also check by DOM ID as a secondary guard
         const newMessages = messages.filter(m => !processedMessages.has(m.id));
         if (newMessages.length === 0) continue;
 
-        // Take the latest unprocessed message to reply to
-        const lastMsg = newMessages[newMessages.length - 1];
         console.log('[WA Bot] New message from', chat.name, ':', lastMsg.text.substring(0, 80));
 
-        // Mark ALL new messages as processed so we don't re-reply
-        newMessages.forEach(m => processedMessages.add(m.id));
+        // Mark ALL messages as processed
+        messages.forEach(m => processedMessages.add(m.id));
         processedCount++;
 
         const contactName = chatInfo.name || chat.name;
@@ -335,6 +345,7 @@
           const sent = await typeAndSend(response.reply);
           if (sent) {
             console.log('[WA Bot] Reply SENT to', chat.name);
+            repliedChats.set(chat.name, { text: lastMsg.text, time: Date.now() });
           }
         } else {
           console.error('[WA Bot] No reply from server for', chat.name);
@@ -411,11 +422,16 @@
     }
   });
 
-  // Clean up old processed message IDs periodically (keep memory low)
+  // Clean up old tracking data periodically (keep memory low)
   setInterval(() => {
     if (processedMessages.size > 500) {
       const arr = Array.from(processedMessages);
       arr.splice(0, arr.length - 200).forEach(id => processedMessages.delete(id));
+    }
+    // Clean up replied chats older than 5 minutes
+    const now = Date.now();
+    for (const [name, data] of repliedChats) {
+      if (now - data.time > 300000) repliedChats.delete(name);
     }
   }, 60000);
 
