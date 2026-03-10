@@ -685,7 +685,7 @@ function Start-Monitor {
             try {
                 $logUploadUrl = $heartbeatUrl -replace '/heartbeat$', '/api/monitor-log'
                 $tail = ""
-                if (Test-Path $logFile) { $tail = (Get-Content $logFile -Tail 50) -join "`n" }
+                if (Test-Path $logFile) { $tail = (Get-Content $logFile -Tail 50) -join [char]10 }
                 Invoke-RestMethod -Uri $logUploadUrl -Method POST -Body "Agent=$([uri]::EscapeDataString($agentName))&Log=$([uri]::EscapeDataString($tail))" -ContentType "application/x-www-form-urlencoded" -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 5 | Out-Null
             } catch {}
         }
