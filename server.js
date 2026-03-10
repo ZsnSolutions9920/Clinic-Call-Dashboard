@@ -7,6 +7,7 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const archiver = require('archiver');
+const SqliteStore = require('better-sqlite3-session-store')(require('express-session'));
 // OpenAI removed — using Google Gemini instead
 
 const app = express();
@@ -113,11 +114,20 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ extended: false })); // Twilio sends form-encoded
 app.use(express.json());
+// Persistent session store — sessions survive server restarts and deployments
+const sessionDb = new Database('sessions.db');
 const sessionMiddleware = session({
+  store: new SqliteStore({
+    client: sessionDb,
+    expired: {
+      clear: true,           // Auto-delete expired sessions
+      intervalMs: 900000     // Clean up every 15 minutes
+    }
+  }),
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 } // 7 days (sessions persist across restarts now)
 });
 app.use(sessionMiddleware);
 
