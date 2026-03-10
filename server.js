@@ -1175,6 +1175,103 @@ const SERVICE_LINKS = {
   'treatments': `${WEBSITE_BASE}/treatments`,
 };
 
+// All valid service URLs for matching broken/partial URLs
+const ALL_SERVICE_URLS = Object.values(SERVICE_LINKS);
+
+// Keyword to URL mapping for auto-detecting which link the AI was trying to include
+const SERVICE_KEYWORDS = {
+  'laser hair': 'laser-hair-removal',
+  'hair removal': 'laser-hair-removal',
+  'weight loss': 'weightloss',
+  'slimming': 'weightloss',
+  'coolsculpt': 'coolsculpting',
+  'emsculpt': 'emsculpt',
+  'fat dissolv': 'fat-dissolving',
+  'kybella': 'fat-dissolving',
+  'lemon bottle': 'fat-dissolving',
+  'hydrafacial': 'hydrafacial',
+  'prx-t33': 'prx-t33',
+  'prx t33': 'prx-t33',
+  'microneedling': 'rf-microneedling',
+  'morpheus': 'rf-microneedling',
+  'chemical peel': 'chemical-peel',
+  'prp': 'prp',
+  'platelet': 'prp',
+  'botox': 'botox',
+  'filler': 'fillers',
+  'dermal filler': 'fillers',
+  'thread lift': 'thread-lift',
+  'acne': 'acne',
+  'vitiligo': 'vitiligo',
+  'psoriasis': 'psoriasis',
+  'regenera': 'regenera',
+  'hair prp': 'hair-prp',
+  'hair restoration': 'hair-restoration',
+  'hair loss': 'hair-restoration',
+  'thermiva': 'thermiva',
+  'emsella': 'emsella',
+  'intimate': 'intimate-health',
+  'vaginal': 'intimate-health',
+  'pelvic': 'emsella',
+  'skin rejuvenation': 'skin-rejuvenation',
+  'anti aging': 'anti-aging',
+  'anti-aging': 'anti-aging',
+  'wrinkle': 'anti-aging',
+  'dermatology': 'dermatology',
+};
+
+function fixReplyLinks(reply) {
+  // Step 1: Replace [LINK:tag] with actual URLs
+  reply = reply.replace(/\[LINK:([a-z0-9\-]+)\]/gi, (match, tag) => {
+    const url = SERVICE_LINKS[tag.toLowerCase()];
+    return url ? `\n\n${url}\n` : '';
+  });
+
+  // Step 2: Strip all URLs from our domain (broken, truncated, or complete)
+  // We'll re-add the correct one in Step 4. NO 'i' flag so it stops at uppercase letters.
+  const strippedUrls = [];
+  reply = reply.replace(/https?:\/\/drnakhoda\.scalamatic\.com[a-z0-9\-\/.#]*/g, (match) => {
+    strippedUrls.push(match);
+    return '';
+  });
+
+  // Step 3: Determine the correct URL to use
+  // First check if any stripped URL was a valid complete one
+  let correctUrl = null;
+  for (const url of strippedUrls) {
+    if (ALL_SERVICE_URLS.includes(url)) {
+      correctUrl = url;
+      break;
+    }
+  }
+
+  // If no valid URL was found, detect topic from keywords
+  if (!correctUrl) {
+    const replyLower = reply.toLowerCase();
+    let bestMatch = null;
+    let bestLen = 0;
+    for (const [keyword, tag] of Object.entries(SERVICE_KEYWORDS)) {
+      if (replyLower.includes(keyword) && keyword.length > bestLen) {
+        bestMatch = tag;
+        bestLen = keyword.length;
+      }
+    }
+    if (bestMatch && SERVICE_LINKS[bestMatch]) {
+      correctUrl = SERVICE_LINKS[bestMatch];
+    }
+  }
+
+  // Step 4: Append the correct URL at the end, properly spaced
+  if (correctUrl) {
+    reply = reply.trimEnd() + '\n\n' + correctUrl;
+  }
+
+  // Step 5: Clean up extra whitespace/newlines
+  reply = reply.replace(/\n{3,}/g, '\n\n').trim();
+
+  return reply;
+}
+
 const CLINIC_SYSTEM_PROMPT = `You are the WhatsApp assistant for Dr. Nakhoda's Skin Institute, a premier dermatology and aesthetic clinic in Karachi, Pakistan.
 
 CLINIC INFO:
@@ -1291,13 +1388,7 @@ async function getGPTReply(phone, incomingText, chatName) {
       return "Thank you for reaching out! Please call us at +92-300-2105374 for assistance.";
     }
 
-    // Replace [LINK:tag] with actual URLs, properly spaced on their own line
-    reply = reply.replace(/\[LINK:([a-z0-9\-]+)\]/gi, (match, tag) => {
-      const url = SERVICE_LINKS[tag.toLowerCase()];
-      return url ? `\n\n${url}\n\n` : '';
-    });
-    // Clean up any triple+ newlines
-    reply = reply.replace(/\n{3,}/g, '\n\n').trim();
+    reply = fixReplyLinks(reply);
 
     logEvent('info', `Groq reply for ${phone}`, reply.substring(0, 80));
     return reply;
