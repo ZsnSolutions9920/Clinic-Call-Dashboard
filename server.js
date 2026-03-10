@@ -832,27 +832,33 @@ function generateInstallerBat(baseUrl, secret, agent) {
   bat += 'powershell -ExecutionPolicy Bypass -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like \'*call_monitor*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" 2>nul\r\n';
   bat += 'echo  [4/5] Old monitor processes cleaned up\r\n\r\n';
 
-  // Start now — run directly with visible window so user can see errors
-  bat += 'echo  [5/5] Starting monitor (visible window for first run)...\r\n';
+  // Verify script was decoded correctly
+  bat += 'echo  [5/6] Verifying script...\r\n';
+  bat += 'if not exist "%DIR%\\call_monitor.ps1" (\r\n';
+  bat += 'echo  ERROR: call_monitor.ps1 was not created! certutil decode failed.\r\n';
+  bat += 'pause\r\n';
+  bat += 'exit /b 1\r\n';
+  bat += ')\r\n';
+  bat += 'for %%A in ("%DIR%\\call_monitor.ps1") do echo  Script size: %%~zA bytes\r\n\r\n';
+
+  // Start now — run directly with visible window
+  bat += 'echo  [6/6] Starting monitor...\r\n';
   bat += 'echo.\r\n';
   bat += 'echo  ============================================\r\n';
   bat += 'echo  Installation complete!\r\n';
-  bat += 'echo  The monitor will auto-start silently on login.\r\n';
-  bat += 'echo  Detects: Phone Link calls + WhatsApp calls\r\n';
-  bat += 'echo.\r\n';
   bat += 'echo  Agent:     ' + agent + '\r\n';
   bat += 'echo  Dashboard: ' + baseUrl + '\r\n';
   bat += 'echo  Log file:  %DIR%\\monitor.log\r\n';
-  bat += 'echo  Crash log: %DIR%\\crash.log\r\n';
   bat += 'echo  ============================================\r\n';
   bat += 'echo.\r\n';
-  bat += 'echo  Starting monitor now... (this window will stay open)\r\n';
-  bat += 'echo  If you see errors below, please screenshot them.\r\n';
+  bat += 'echo  Monitor running with visible window. DO NOT close this.\r\n';
+  bat += 'echo  Errors will appear below. Screenshot them if it crashes.\r\n';
+  bat += 'echo  ============================================\r\n';
   bat += 'echo.\r\n';
-  bat += 'powershell -ExecutionPolicy Bypass -File "%DIR%\\call_monitor.ps1"\r\n';
+  bat += 'powershell -ExecutionPolicy Bypass -NoExit -File "%DIR%\\call_monitor.ps1"\r\n';
   bat += 'echo.\r\n';
   bat += 'echo  ============================================\r\n';
-  bat += 'echo  MONITOR CRASHED / EXITED\r\n';
+  bat += 'echo  MONITOR EXITED\r\n';
   bat += 'echo  ============================================\r\n';
   bat += 'echo.\r\n';
   bat += 'echo  --- monitor.log (last 30 lines) ---\r\n';
@@ -865,9 +871,7 @@ function generateInstallerBat(baseUrl, secret, agent) {
   bat += 'powershell -Command "Get-Content \'%APPDATA%\\ClinicaCallMonitor\\crash.log\' -Tail 30"\r\n';
   bat += ') else ( echo   No crash.log found )\r\n';
   bat += 'echo.\r\n';
-  bat += 'echo  Opening log folder...\r\n';
   bat += 'explorer "%DIR%"\r\n';
-  bat += 'echo.\r\n';
   bat += 'pause\r\n';
 
   return bat;
