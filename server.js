@@ -226,6 +226,7 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
     callSid,
     cliniceaUrl,
     callId,
+    agent: agent || null,
     timestamp: new Date().toISOString()
   };
   if (agent) {

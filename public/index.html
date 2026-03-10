@@ -1984,11 +1984,11 @@
 
       playBeep();
 
-      // Only auto-open profile tab from one browser tab (use localStorage lock)
+      // Only auto-open profile if this call belongs to the logged-in agent (or admin)
+      const isMyCall = !data.agent || myRole === 'admin' || data.agent === myUsername;
       const lockKey = 'call_opened_' + data.callId;
-      if (!localStorage.getItem(lockKey)) {
+      if (isMyCall && !localStorage.getItem(lockKey)) {
         localStorage.setItem(lockKey, '1');
-        // Clean up old locks after 60s
         setTimeout(() => localStorage.removeItem(lockKey), 60000);
         window.open(data.cliniceaUrl, 'clinicea_patient');
       }
@@ -2965,9 +2965,12 @@
     });
 
     // ===== AGENT INFO =====
+    let myUsername = null, myRole = null;
     fetch('/api/me').then(r => r.json()).then(data => {
       const el = document.getElementById('agentInfo');
       if (data.username) {
+        myUsername = data.username;
+        myRole = data.role;
         el.textContent = data.role === 'admin' ? 'Admin' : data.username.charAt(0).toUpperCase() + data.username.slice(1);
       }
     }).catch(() => {});
