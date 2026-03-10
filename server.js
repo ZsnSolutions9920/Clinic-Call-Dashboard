@@ -293,6 +293,22 @@ app.post('/api/test-call', requireAuth, (req, res) => {
   res.json({ status: 'ok', callEvent });
 });
 
+// --- Monitor log upload (so we can read logs remotely) ---
+const monitorLogs = {}; // { agent: "log text" }
+app.post('/api/monitor-log', requireWebhookSecret, (req, res) => {
+  const agent = (req.body.Agent || '_default').trim();
+  const logText = req.body.Log || '';
+  monitorLogs[agent] = logText;
+  res.json({ status: 'ok' });
+});
+app.get('/api/monitor-log/:agent', requireAuth, (req, res) => {
+  const agent = req.params.agent || '_default';
+  res.type('text/plain').send(monitorLogs[agent] || '(no log uploaded yet)');
+});
+app.get('/api/monitor-log', requireAuth, (req, res) => {
+  res.json(Object.keys(monitorLogs).map(k => ({ agent: k, lines: (monitorLogs[k] || '').split('\n').length })));
+});
+
 // --- Monitor Heartbeat (per-agent, strict isolation) ---
 const agentHeartbeats = {}; // { agent: { lastHeartbeat, alive } }
 const warnedBadAgents = new Set(); // only warn once per unknown agent value
@@ -665,6 +681,13 @@ function Start-Monitor {
                 }
             }
             if (-not $hbOk) { Write-Log "WARNING: All 3 heartbeat attempts failed — server may be down" }
+            # Upload last 50 lines of log to server so it can be viewed remotely
+            try {
+                $logUploadUrl = $heartbeatUrl -replace '/heartbeat$', '/api/monitor-log'
+                $tail = ""
+                if (Test-Path $logFile) { $tail = (Get-Content $logFile -Tail 50) -join "`n" }
+                Invoke-RestMethod -Uri $logUploadUrl -Method POST -Body "Agent=$([uri]::EscapeDataString($agentName))&Log=$([uri]::EscapeDataString($tail))" -ContentType "application/x-www-form-urlencoded" -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 5 | Out-Null
+            } catch {}
         }
         Start-Sleep -Seconds 1
     }

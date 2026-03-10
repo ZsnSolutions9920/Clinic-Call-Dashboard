@@ -1665,6 +1665,12 @@
           </svg>
           Test Call
         </a>
+        <a class="nav-item" href="#" id="viewMonitorLogBtn" onclick="viewMonitorLog(); return false;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+          </svg>
+          Monitor Log
+        </a>
       </nav>
 
       <div class="sidebar-footer">
@@ -1953,6 +1959,30 @@
       } catch (e) {
         console.error('[Dashboard] Test call failed:', e);
         alert('Test call failed: ' + e.message);
+      }
+    };
+
+    // ===== VIEW MONITOR LOG =====
+    window.viewMonitorLog = async function() {
+      try {
+        // First check which agents have logs
+        const listRes = await fetch('/api/monitor-log');
+        const agents = await listRes.json();
+        let agent = '_default';
+        if (myUsername && myRole !== 'admin') {
+          agent = myUsername;
+        } else if (agents.length > 0) {
+          agent = agents.map(a => a.agent + ' (' + a.lines + ' lines)').join(', ');
+          const pick = prompt('Available logs: ' + agent + '\\nEnter agent name:', agents[0].agent);
+          if (!pick) return;
+          agent = pick.trim();
+        }
+        const res = await fetch('/api/monitor-log/' + encodeURIComponent(agent));
+        const text = await res.text();
+        const w = window.open('', 'monitor_log', 'width=900,height=600');
+        w.document.write('<html><head><title>Monitor Log: ' + agent + '</title></head><body style="background:#1a1a2e;color:#0f0;font-family:monospace;font-size:13px;padding:16px;white-space:pre-wrap;">' + text.replace(/</g,'&lt;') + '</body></html>');
+      } catch (e) {
+        alert('Failed to load monitor log: ' + e.message);
       }
     };
 
