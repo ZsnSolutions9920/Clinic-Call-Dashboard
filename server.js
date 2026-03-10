@@ -211,12 +211,6 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
 
   // Validate agent — must be a known username, never broadcast blindly
   const agent = (rawAgent && USERS[rawAgent]) ? rawAgent : null;
-  if (rawAgent && !agent) {
-    logEvent('warn', `Incoming call rejected unknown agent: "${rawAgent}"`, 'Caller: ' + caller);
-  }
-  if (!agent) {
-    logEvent('warn', 'Incoming call has no valid agent — will NOT broadcast', 'Caller: ' + caller + ' | Raw Agent: "' + rawAgent + '"');
-  }
 
   // Build Clinicea patient lookup URL
   const cliniceaUrl = `${CLINICEA_BASE_URL}?tp=pat&m=${encodeURIComponent(caller)}`;
@@ -402,7 +396,11 @@ if (Test-Path $logFile) {
     try { if ((Get-Item $logFile).Length -gt 1MB) { Get-Content $logFile -Tail 200 | Set-Content "$logFile.tmp"; Move-Item "$logFile.tmp" $logFile -Force } } catch {}
 }
 
-Write-Log "=== Monitor starting ==="
+if (-not $agentName) {
+    Write-Log "FATAL: agentName is empty — this monitor was installed without an agent. Re-download from dashboard."
+    exit 1
+}
+Write-Log "=== Monitor starting === Agent: $agentName"
 
 try {
     [void][Windows.UI.Notifications.Management.UserNotificationListener, Windows.UI.Notifications, ContentType = WindowsRuntime]
@@ -521,14 +519,22 @@ function generateInstallerBat(baseUrl, secret, agent) {
   const vbsLines = vbsB64.match(/.{1,76}/g) || [];
 
   let bat = '@echo off\r\n';
-  bat += 'title Clinicea Call Monitor - Installer\r\n';
+  bat += 'title Clinicea Call Monitor - Installer (' + agent + ')\r\n';
   bat += 'echo.\r\n';
   bat += 'echo  === Clinicea Call Monitor - Installer ===\r\n';
+  bat += 'echo  Agent: ' + agent + '\r\n';
   bat += 'echo.\r\n\r\n';
+
+  // Kill any old monitor processes before installing new one
+  bat += 'echo  [0/5] Stopping old monitor processes...\r\n';
+  bat += 'taskkill /F /FI "WINDOWTITLE eq Clinicea*" >nul 2>&1\r\n';
+  bat += 'powershell -Command "Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq \'\' -and (Get-WmiObject Win32_Process -Filter \\"ProcessId=$($_.Id)\\" -ErrorAction SilentlyContinue).CommandLine -like \'*call_monitor*\' } | Stop-Process -Force -ErrorAction SilentlyContinue" >nul 2>&1\r\n';
+  bat += 'taskkill /F /IM wscript.exe /FI "WINDOWTITLE eq ClinicaCallMonitor*" >nul 2>&1\r\n';
+  bat += 'echo  Done.\r\n\r\n';
 
   bat += 'set "DIR=%APPDATA%\\ClinicaCallMonitor"\r\n';
   bat += 'if not exist "%DIR%" mkdir "%DIR%"\r\n';
-  bat += 'echo  [1/4] Install folder: %DIR%\r\n\r\n';
+  bat += 'echo  [1/5] Install folder: %DIR%\r\n\r\n';
 
   // Write monitor PS1 via certutil base64 decode
   bat += '> "%TEMP%\\cm_b64.tmp" (\r\n';
@@ -540,7 +546,7 @@ function generateInstallerBat(baseUrl, secret, agent) {
   bat += ')\r\n';
   bat += 'certutil -decode "%TEMP%\\cm_b64.tmp" "%DIR%\\call_monitor.ps1" >nul 2>&1\r\n';
   bat += 'del "%TEMP%\\cm_b64.tmp" 2>nul\r\n';
-  bat += 'echo  [2/4] Monitor script installed\r\n\r\n';
+  bat += 'echo  [2/5] Monitor script installed (agent: ' + agent + ')\r\n\r\n';
 
   // Write VBS launcher via certutil
   bat += '> "%TEMP%\\vbs_b64.tmp" (\r\n';
@@ -555,11 +561,15 @@ function generateInstallerBat(baseUrl, secret, agent) {
 
   // Copy VBS to Windows Startup
   bat += 'copy /Y "%DIR%\\start_monitor.vbs" "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\ClinicaCallMonitor.vbs" >nul\r\n';
-  bat += 'echo  [3/4] Added to Windows startup (auto-runs on login)\r\n\r\n';
+  bat += 'echo  [3/5] Added to Windows startup (auto-runs on login)\r\n\r\n';
+
+  // Kill any remaining monitor powershell processes (hidden ones from old VBS launcher)
+  bat += 'powershell -Command "Get-WmiObject Win32_Process -Filter \\"Name=\'powershell.exe\'\\" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like \'*call_monitor.ps1*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1\r\n';
+  bat += 'echo  [4/5] Old monitor processes killed\r\n\r\n';
 
   // Start now
   bat += 'start "" wscript.exe "%DIR%\\start_monitor.vbs"\r\n';
-  bat += 'echo  [4/4] Monitor started!\r\n\r\n';
+  bat += 'echo  [5/5] Monitor started!\r\n\r\n';
 
   bat += 'echo.\r\n';
   bat += 'echo  Installation complete!\r\n';
@@ -567,6 +577,7 @@ function generateInstallerBat(baseUrl, secret, agent) {
   bat += 'echo  It auto-starts every time you log into Windows.\r\n';
   bat += 'echo  Detects: Phone Link calls + WhatsApp calls\r\n';
   bat += 'echo.\r\n';
+  bat += 'echo  Agent:     ' + agent + '\r\n';
   bat += 'echo  Dashboard: ' + baseUrl + '\r\n';
   bat += 'echo  Log file:  %DIR%\\monitor.log\r\n';
   bat += 'echo.\r\n';
