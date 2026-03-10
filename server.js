@@ -113,8 +113,8 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
-app.use(express.urlencoded({ extended: false })); // Twilio sends form-encoded
-app.use(express.json());
+app.use(express.urlencoded({ extended: false, verify: (req, res, buf) => { req.rawBody = buf.toString(); } }));
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf.toString(); } }));
 // Persistent session store — sessions survive server restarts and deployments
 const sessionDb = new Database('sessions.db');
 const sessionMiddleware = session({
@@ -242,7 +242,7 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   const callSid = req.body.CallSid || '';
   const rawAgent = (req.body.Agent || '').trim();
 
-  logEvent('info', `POST /incoming_call received`, `From: "${rawCaller}" | Agent: "${rawAgent}" | IP: ${req.ip || req.connection.remoteAddress} | Body keys: ${Object.keys(req.body).join(',')} | Raw body: ${JSON.stringify(req.body).substring(0, 300)}`);
+  logEvent('info', `POST /incoming_call received`, `From: "${rawCaller}" | Agent: "${rawAgent}" | IP: ${req.ip || req.connection.remoteAddress} | CT: ${req.headers['content-type']} | Raw: "${req.rawBody || ''}" | Body: ${JSON.stringify(req.body).substring(0, 300)}`);
 
   // Validate agent — must be a known username, never broadcast blindly
   const agent = (rawAgent && USERS[rawAgent]) ? rawAgent : null;
@@ -358,7 +358,7 @@ app.post('/heartbeat', requireWebhookSecret, (req, res) => {
   const start = Date.now();
   const rawAgent = (req.body.Agent || '').trim();
   const agent = (rawAgent && USERS[rawAgent]) ? rawAgent : null;
-  logEvent('debug', `Heartbeat received`, `Agent: "${rawAgent}" | Resolved: ${agent || 'null'} | Body: ${JSON.stringify(req.body).substring(0, 200)}`);
+  logEvent('debug', `Heartbeat received`, `Agent: "${rawAgent}" | Resolved: ${agent || 'null'} | CT: ${req.headers['content-type']} | Raw: "${req.rawBody || ''}" | Body: ${JSON.stringify(req.body).substring(0, 200)}`);
   const key = agent || '_default';
   const prev = agentHeartbeats[key] || { lastHeartbeat: 0, alive: false };
   const wasDown = !prev.alive;
