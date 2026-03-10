@@ -272,54 +272,75 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
 // --- Monitor Heartbeat (per-agent, strict isolation) ---
 const agentHeartbeats = {}; // { agent: { lastHeartbeat, alive } }
 const warnedBadAgents = new Set(); // only warn once per unknown agent value
+const HEARTBEAT_STALE_MS = 90000; // 90s — generous to survive server restarts + network hiccups
+const HEARTBEAT_CHECK_INTERVAL = 15000; // check every 15s
+const serverStartTime = Date.now();
+// Grace period after server start — don't mark monitors dead until they've had time to send a heartbeat
+const STARTUP_GRACE_MS = 120000; // 2 min grace after server restart
 
 app.post('/heartbeat', requireWebhookSecret, (req, res) => {
+  const start = Date.now();
   const rawAgent = (req.body.Agent || '').trim();
   const agent = (rawAgent && USERS[rawAgent]) ? rawAgent : null;
   const key = agent || '_default';
   const prev = agentHeartbeats[key] || { lastHeartbeat: 0, alive: false };
   const wasDown = !prev.alive;
-  agentHeartbeats[key] = { lastHeartbeat: Date.now(), alive: true };
+  const now = Date.now();
+  agentHeartbeats[key] = { lastHeartbeat: now, alive: true };
   if (agent) {
-    // Known agent — notify that agent + admin
     io.to('agent:' + agent).emit('monitor_status', { alive: true, agent });
     io.to('role:admin').emit('monitor_status', { alive: true, agent });
-    if (wasDown) logEvent('info', `Call monitor connected: ${agent}`);
+    if (wasDown) logEvent('info', `Call monitor connected: ${agent}`, `IP: ${req.ip || req.connection.remoteAddress}`);
   } else {
-    // No agent tag — broadcast to everyone so all dashboards show monitor online
     io.emit('monitor_status', { alive: true, agent: null });
-    if (wasDown) logEvent('info', `Call monitor connected (no agent tag, raw: "${rawAgent}")`);
+    if (wasDown) logEvent('info', `Call monitor connected (no agent tag, raw: "${rawAgent}")`, `IP: ${req.ip || req.connection.remoteAddress}`);
+  }
+  const elapsed = Date.now() - start;
+  if (elapsed > 500) {
+    logEvent('warn', `Heartbeat slow: ${elapsed}ms`, `agent: ${key}`);
   }
   res.json({ status: 'ok' });
 });
 
 // Check every 15s if any agent monitor went stale
 setInterval(() => {
+  const now = Date.now();
+  // During startup grace period, don't mark anything dead
+  if ((now - serverStartTime) < STARTUP_GRACE_MS) return;
+
   for (const [key, state] of Object.entries(agentHeartbeats)) {
-    if (state.alive && (Date.now() - state.lastHeartbeat) > 45000) {
+    if (state.alive && (now - state.lastHeartbeat) > HEARTBEAT_STALE_MS) {
+      const staleSec = Math.round((now - state.lastHeartbeat) / 1000);
       state.alive = false;
       if (key !== '_default' && USERS[key]) {
         io.to('agent:' + key).emit('monitor_status', { alive: false, agent: key });
         io.to('role:admin').emit('monitor_status', { alive: false, agent: key });
-        logEvent('warn', `Call monitor disconnected: ${key}`);
+        logEvent('warn', `Call monitor disconnected: ${key}`, `No heartbeat for ${staleSec}s`);
       } else {
         io.emit('monitor_status', { alive: false, agent: null });
-        logEvent('warn', 'Call monitor disconnected (untagged)');
+        logEvent('warn', 'Call monitor disconnected (untagged)', `No heartbeat for ${staleSec}s`);
       }
     }
   }
-}, 15000);
+}, HEARTBEAT_CHECK_INTERVAL);
 
 app.get('/api/monitor-status', requireAuth, (req, res) => {
   const agent = req.session.username;
   const isAdmin = req.session.role === 'admin';
+  const now = Date.now();
+  // During startup grace, report status as "unknown" rather than "dead"
+  const inGrace = (now - serverStartTime) < STARTUP_GRACE_MS;
+
   if (isAdmin) {
     const anyAlive = Object.values(agentHeartbeats).some(s => s.alive);
-    return res.json({ alive: anyAlive, agents: agentHeartbeats });
+    // If no heartbeats yet but still in grace period, don't say dead
+    const hasAnyData = Object.keys(agentHeartbeats).length > 0;
+    return res.json({ alive: anyAlive || (inGrace && !hasAnyData), agents: agentHeartbeats });
   }
-  // Agent sees only their own monitor
-  const agentState = agentHeartbeats[agent];
-  res.json({ alive: !!(agentState && agentState.alive) });
+  // Agent sees own monitor or _default (untagged)
+  const agentState = agentHeartbeats[agent] || agentHeartbeats['_default'];
+  const alive = !!(agentState && agentState.alive) || (inGrace && !agentState);
+  res.json({ alive });
 });
 
 // --- Download call monitor installer (pre-configured .bat, agent-specific) ---
@@ -553,10 +574,19 @@ function Start-Monitor {
 
         $now = [DateTimeOffset]::Now.ToUnixTimeSeconds()
         if (($now - $lastHeartbeat) -ge 30) {
-            try {
-                Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Body "Agent=$([uri]::EscapeDataString($agentName))" -ContentType "application/x-www-form-urlencoded" -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 5 | Out-Null
-                $lastHeartbeat = $now
-            } catch { Write-Log "Heartbeat error: $_" }
+            $hbOk = $false
+            for ($hbRetry = 1; $hbRetry -le 3; $hbRetry++) {
+                try {
+                    Invoke-RestMethod -Uri $heartbeatUrl -Method POST -Body "Agent=$([uri]::EscapeDataString($agentName))" -ContentType "application/x-www-form-urlencoded" -Headers @{ "X-Webhook-Secret" = $webhookSecret } -TimeoutSec 10 | Out-Null
+                    $lastHeartbeat = $now
+                    $hbOk = $true
+                    break
+                } catch {
+                    Write-Log "Heartbeat attempt $hbRetry failed: $_"
+                    if ($hbRetry -lt 3) { Start-Sleep -Seconds 2 }
+                }
+            }
+            if (-not $hbOk) { Write-Log "WARNING: All 3 heartbeat attempts failed — server may be down" }
         }
         Start-Sleep -Seconds 1
     }
@@ -1748,6 +1778,22 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     logEvent('info', `Socket disconnected: ${username || 'unknown'} | SID: ${socket.id}`);
   });
+});
+
+// --- Process stability: prevent crashes from killing the server ---
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err.message, err.stack);
+  try { logEvent('error', 'Uncaught exception: ' + err.message); } catch (e) {}
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error('[FATAL] Unhandled rejection:', msg);
+  try { logEvent('error', 'Unhandled rejection: ' + msg); } catch (e) {}
+});
+process.on('SIGTERM', () => {
+  console.log('[INFO] SIGTERM received — shutting down gracefully');
+  try { logEvent('info', 'Server shutting down (SIGTERM)'); } catch (e) {}
+  process.exit(0);
 });
 
 // --- Start ---
