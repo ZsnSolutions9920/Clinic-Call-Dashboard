@@ -21,6 +21,7 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const EXTENSION_SECRET = process.env.EXTENSION_SECRET;
 
 if (!SESSION_SECRET) {
   console.error('ERROR: SESSION_SECRET is not set in .env');
@@ -107,7 +108,7 @@ app.use((req, res, next) => {
   if (origin && (origin.includes('web.whatsapp.com') || origin.includes('chrome-extension'))) {
     res.header('Access-Control-Allow-Origin', origin);
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, X-Extension-Key');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -476,6 +477,12 @@ app.get('/download/whatsapp-extension', requireAuth, (req, res) => {
         /const DEFAULT_SERVER_URL = '[^']*'/,
         `const DEFAULT_SERVER_URL = '${serverUrl}'`
       );
+      if (EXTENSION_SECRET) {
+        content = content.replace(
+          /const DEFAULT_EXTENSION_KEY = '[^']*'/,
+          `const DEFAULT_EXTENSION_KEY = '${EXTENSION_SECRET}'`
+        );
+      }
       archive.append(content, { name: file });
     } else if (file === 'manifest.json') {
       let content = fs.readFileSync(filePath, 'utf8');
@@ -939,14 +946,25 @@ function generateInstallerBat(baseUrl, secret, agent) {
   return bat;
 }
 
-// --- Public WhatsApp API Routes (no auth — called by Chrome Extension) ---
-// These MUST be before the static middleware which requires auth
+// --- WhatsApp Extension Auth ---
+function requireExtensionAuth(req, res, next) {
+  if (!EXTENSION_SECRET) return next(); // Skip if not configured (backwards compat)
+  const provided = req.headers['x-extension-key'];
+  if (provided !== EXTENSION_SECRET) {
+    logEvent('warn', 'Extension auth failed', 'IP: ' + (req.ip || req.connection.remoteAddress));
+    return res.status(401).json({ error: 'Invalid extension key', reply: null });
+  }
+  next();
+}
+
+// --- WhatsApp API Routes (extension-auth — called by Chrome Extension) ---
+// These MUST be before the static middleware which requires session auth
 
 // Paused chats — bot won't reply to these
 const pausedChats = new Set();
 
 // Incoming message from WhatsApp (via extension)
-app.post('/api/whatsapp/incoming', async (req, res) => {
+app.post('/api/whatsapp/incoming', requireExtensionAuth, async (req, res) => {
   const { messageId, text, phone, chatName, timestamp } = req.body;
 
   if (!text || (!phone && !chatName)) {
@@ -979,7 +997,7 @@ app.post('/api/whatsapp/incoming', async (req, res) => {
 });
 
 // Poll for pending outgoing messages (confirmations, reminders)
-app.get('/api/whatsapp/outgoing', (req, res) => {
+app.get('/api/whatsapp/outgoing', requireExtensionAuth, (req, res) => {
   const pending = getPendingOutgoing.all();
   const messages = pending.map(m => ({
     id: m.id,
@@ -991,7 +1009,7 @@ app.get('/api/whatsapp/outgoing', (req, res) => {
 });
 
 // Confirm a message was sent by the extension
-app.post('/api/whatsapp/sent', (req, res) => {
+app.post('/api/whatsapp/sent', requireExtensionAuth, (req, res) => {
   const { id, phone, success } = req.body;
   if (id) {
     if (success) {

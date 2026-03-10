@@ -1,11 +1,14 @@
 // Background service worker - relays messages between content script and server
 const DEFAULT_SERVER_URL = 'https://clinicea.scalamatic.com';
+const DEFAULT_EXTENSION_KEY = '';
 let serverUrl = DEFAULT_SERVER_URL;
+let extensionKey = DEFAULT_EXTENSION_KEY;
 
-// Load saved URL on startup (falls back to hardcoded default)
-chrome.storage.local.get(['serverUrl'], (result) => {
+// Load saved settings on startup
+chrome.storage.local.get(['serverUrl', 'extensionKey'], (result) => {
   serverUrl = result.serverUrl || DEFAULT_SERVER_URL;
-  console.log('[WA Bot BG] Server URL:', serverUrl);
+  extensionKey = result.extensionKey || DEFAULT_EXTENSION_KEY;
+  console.log('[WA Bot BG] Server URL:', serverUrl, '| Key:', extensionKey ? 'set' : 'not set');
 });
 
 // Also listen for storage changes
@@ -14,13 +17,33 @@ chrome.storage.onChanged.addListener((changes) => {
     serverUrl = changes.serverUrl.newValue || '';
     console.log('[WA Bot BG] Server URL updated:', serverUrl);
   }
+  if (changes.extensionKey) {
+    extensionKey = changes.extensionKey.newValue || '';
+    console.log('[WA Bot BG] Extension key updated');
+  }
 });
+
+// Build headers with optional extension auth
+function getHeaders(contentType) {
+  const h = {};
+  if (contentType) h['Content-Type'] = contentType;
+  if (extensionKey) h['X-Extension-Key'] = extensionKey;
+  return h;
+}
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'SET_SERVER_URL') {
     serverUrl = msg.url;
     chrome.storage.local.set({ serverUrl: msg.url });
     console.log('[WA Bot BG] Server URL set to:', serverUrl);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg.type === 'SET_EXTENSION_KEY') {
+    extensionKey = msg.key;
+    chrome.storage.local.set({ extensionKey: msg.key });
+    console.log('[WA Bot BG] Extension key updated');
     sendResponse({ ok: true });
     return true;
   }
@@ -35,7 +58,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     console.log('[WA Bot BG] Forwarding message to server:', msg.data.text?.substring(0, 50));
     fetch(`${serverUrl}/api/whatsapp/incoming`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders('application/json'),
       body: JSON.stringify(msg.data)
     })
       .then(r => {
@@ -54,7 +77,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'CHECK_OUTGOING') {
-    fetch(`${serverUrl}/api/whatsapp/outgoing`)
+    fetch(`${serverUrl}/api/whatsapp/outgoing`, { headers: getHeaders() })
       .then(r => r.json())
       .then(data => sendResponse(data))
       .catch(err => sendResponse({ error: err.message, messages: [] }));
@@ -64,7 +87,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'MESSAGE_SENT') {
     fetch(`${serverUrl}/api/whatsapp/sent`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders('application/json'),
       body: JSON.stringify(msg.data)
     })
       .then(r => r.json())
