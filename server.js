@@ -207,7 +207,16 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   const rawCaller = req.body.From || 'Unknown';
   const caller = rawCaller !== 'Unknown' ? normalizePKPhone(rawCaller) : rawCaller;
   const callSid = req.body.CallSid || '';
-  const agent = req.body.Agent || null;
+  const rawAgent = (req.body.Agent || '').trim();
+
+  // Validate agent — must be a known username, never broadcast blindly
+  const agent = (rawAgent && USERS[rawAgent]) ? rawAgent : null;
+  if (rawAgent && !agent) {
+    logEvent('warn', `Incoming call rejected unknown agent: "${rawAgent}"`, 'Caller: ' + caller);
+  }
+  if (!agent) {
+    logEvent('warn', 'Incoming call has no valid agent — will NOT broadcast', 'Caller: ' + caller + ' | Raw Agent: "' + rawAgent + '"');
+  }
 
   // Build Clinicea patient lookup URL
   const cliniceaUrl = `${CLINICEA_BASE_URL}?tp=pat&m=${encodeURIComponent(caller)}`;
@@ -218,9 +227,6 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   ).run(caller, callSid, cliniceaUrl, agent);
   const callId = result.lastInsertRowid;
 
-  logEvent('info', 'Incoming call: ' + caller, 'Agent: ' + (agent || 'unassigned') + ' | SID: ' + callSid);
-
-  // Push to the specific agent's room, or broadcast to all if no agent
   const callEvent = {
     caller,
     callSid,
@@ -229,12 +235,16 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
     agent: agent || null,
     timestamp: new Date().toISOString()
   };
+
+  // STRICT ISOLATION: only emit to the specific agent's room + admin. Never broadcast.
   if (agent) {
     io.to('agent:' + agent).emit('incoming_call', callEvent);
     io.to('role:admin').emit('incoming_call', callEvent);
+    logEvent('info', 'Incoming call: ' + caller, `Agent: ${agent} | SID: ${callSid} | Rooms: agent:${agent}, role:admin`);
   } else {
-    // Old monitor without agent tag — broadcast to everyone
-    io.emit('incoming_call', callEvent);
+    // No valid agent — only notify admins so they can investigate
+    io.to('role:admin').emit('incoming_call', callEvent);
+    logEvent('warn', 'Incoming call (no agent): ' + caller, `SID: ${callSid} | Rooms: role:admin only`);
   }
 
   // Async: look up patient name and push update to dashboard
@@ -247,12 +257,13 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
         if (patient.patientID) {
           updateCallPatientId.run(patient.patientID, callId);
         }
-        const patientEvent = { caller, callId, patientName: patient.patientName, patientID: patient.patientID };
+        const patientEvent = { caller, callId, agent: agent || null, patientName: patient.patientName, patientID: patient.patientID };
+        // STRICT ISOLATION: same routing as incoming_call
         if (agent) {
           io.to('agent:' + agent).emit('patient_info', patientEvent);
           io.to('role:admin').emit('patient_info', patientEvent);
         } else {
-          io.emit('patient_info', patientEvent);
+          io.to('role:admin').emit('patient_info', patientEvent);
         }
         logEvent('info', 'Patient identified: ' + (patient.patientName || 'Unknown'), caller);
       }
@@ -263,39 +274,36 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
   res.json({ status: 'ok', caller, cliniceaUrl });
 });
 
-// --- Monitor Heartbeat (per-agent) ---
+// --- Monitor Heartbeat (per-agent, strict isolation) ---
 const agentHeartbeats = {}; // { agent: { lastHeartbeat, alive } }
 
 app.post('/heartbeat', requireWebhookSecret, (req, res) => {
-  const agent = req.body.Agent || null;
-  const key = agent || 'default';
-  const prev = agentHeartbeats[key] || { lastHeartbeat: 0, alive: false };
-  const wasDown = !prev.alive;
-  agentHeartbeats[key] = { lastHeartbeat: Date.now(), alive: true };
-  if (agent) {
-    // Agent-specific monitor — notify that agent + admin
-    io.to('agent:' + agent).emit('monitor_status', { alive: true });
-    io.to('role:admin').emit('monitor_status', { alive: true, agent });
-  } else {
-    // Old monitor without agent — broadcast to everyone
-    io.emit('monitor_status', { alive: true });
+  const rawAgent = (req.body.Agent || '').trim();
+  const agent = (rawAgent && USERS[rawAgent]) ? rawAgent : null;
+  if (!agent) {
+    // Reject heartbeats without a valid agent — no silent broadcast
+    logEvent('warn', `Heartbeat rejected: no valid agent (raw: "${rawAgent}")`);
+    return res.json({ status: 'ok', warning: 'no valid agent' });
   }
-  if (wasDown) logEvent('info', `Call monitor connected (${key})`);
+  const prev = agentHeartbeats[agent] || { lastHeartbeat: 0, alive: false };
+  const wasDown = !prev.alive;
+  agentHeartbeats[agent] = { lastHeartbeat: Date.now(), alive: true };
+  // STRICT ISOLATION: only notify the specific agent + admin
+  io.to('agent:' + agent).emit('monitor_status', { alive: true, agent });
+  io.to('role:admin').emit('monitor_status', { alive: true, agent });
+  if (wasDown) logEvent('info', `Call monitor connected: ${agent} | Rooms: agent:${agent}, role:admin`);
   res.json({ status: 'ok' });
 });
 
 // Check every 15s if any agent monitor went stale
 setInterval(() => {
-  for (const [key, state] of Object.entries(agentHeartbeats)) {
+  for (const [agent, state] of Object.entries(agentHeartbeats)) {
     if (state.alive && (Date.now() - state.lastHeartbeat) > 45000) {
       state.alive = false;
-      if (key !== 'default') {
-        io.to('agent:' + key).emit('monitor_status', { alive: false });
-        io.to('role:admin').emit('monitor_status', { alive: false, agent: key });
-      } else {
-        io.emit('monitor_status', { alive: false });
-      }
-      logEvent('warn', `Call monitor disconnected (${key})`);
+      // STRICT ISOLATION: only notify the specific agent + admin
+      io.to('agent:' + agent).emit('monitor_status', { alive: false, agent });
+      io.to('role:admin').emit('monitor_status', { alive: false, agent });
+      logEvent('warn', `Call monitor disconnected: ${agent} | Rooms: agent:${agent}, role:admin`);
     }
   }
 }, 15000);
@@ -1613,17 +1621,21 @@ io.on('connection', (socket) => {
   const role = session && session.role;
 
   if (username) {
+    // Each user joins ONLY their own agent room
     socket.join('agent:' + username);
+    const rooms = ['agent:' + username];
     if (role === 'admin') {
       socket.join('role:admin');
+      rooms.push('role:admin');
     }
-    logEvent('info', `Dashboard client connected: ${username} (${role})`);
+    logEvent('info', `Socket connected: ${username} (${role}) | Rooms: ${rooms.join(', ')} | SID: ${socket.id}`);
   } else {
-    logEvent('info', 'Dashboard client connected (unauthenticated)');
+    // Unauthenticated sockets join NO rooms — they receive nothing
+    logEvent('warn', `Socket connected (unauthenticated) — no rooms joined | SID: ${socket.id}`);
   }
 
   socket.on('disconnect', () => {
-    logEvent('info', `Dashboard client disconnected: ${username || 'unknown'}`);
+    logEvent('info', `Socket disconnected: ${username || 'unknown'} | SID: ${socket.id}`);
   });
 });
 

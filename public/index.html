@@ -1847,6 +1847,20 @@
 
   <script>
     const socket = io({ transports: ['websocket'] });
+
+    // --- AGENT IDENTITY (loaded eagerly to guard socket events) ---
+    let myUsername = null, myRole = null;
+    fetch('/api/me').then(r => r.json()).then(data => {
+      if (data.username) {
+        myUsername = data.username;
+        myRole = data.role;
+        console.log('[Dashboard] Identity loaded:', myUsername, 'role:', myRole);
+        // Update agent info display
+        const el = document.getElementById('agentInfo');
+        if (el) el.textContent = data.role === 'admin' ? 'Admin' : data.username.charAt(0).toUpperCase() + data.username.slice(1);
+      }
+    }).catch(() => { console.warn('[Dashboard] Failed to load /api/me'); });
+
     const statusDot = document.getElementById('statusDot');
     const statusText = document.getElementById('statusText');
     const monitorDot = document.getElementById('monitorDot');
@@ -1939,7 +1953,30 @@
       }
     }
 
-    socket.on('monitor_status', (data) => setMonitorStatus(data.alive));
+    // --- OWNERSHIP CHECK: is this event for the current logged-in user? ---
+    // Defined early so all socket handlers below can use it.
+    function isEventForMe(data) {
+      // Identity not loaded yet — reject to prevent leaks (call history loads on next refresh)
+      if (!myUsername || !myRole) {
+        console.log('[Dashboard] Event rejected — identity not loaded yet');
+        return false;
+      }
+      // Admin sees everything
+      if (myRole === 'admin') return true;
+      // Agent must match exactly — reject if no agent or different agent
+      if (!data.agent || data.agent !== myUsername) return false;
+      return true;
+    }
+
+    socket.on('monitor_status', (data) => {
+      // STRICT: only update monitor status for events belonging to this agent
+      if (!isEventForMe(data)) {
+        console.log('[Dashboard] monitor_status REJECTED — event.agent:', data.agent, 'me:', myUsername);
+        return;
+      }
+      console.log('[Dashboard] monitor_status ACCEPTED — event.agent:', data.agent, 'me:', myUsername);
+      setMonitorStatus(data.alive);
+    });
 
     async function checkMonitorStatus() {
       try {
@@ -1955,6 +1992,12 @@
     const patientNameBanner = document.getElementById('patientNameBanner');
 
     socket.on('patient_info', (data) => {
+      // STRICT: only process if this event belongs to the logged-in user
+      if (!isEventForMe(data)) {
+        console.log('[Dashboard] patient_info REJECTED — event.agent:', data.agent, 'me:', myUsername);
+        return;
+      }
+      console.log('[Dashboard] patient_info ACCEPTED — event.agent:', data.agent, 'me:', myUsername);
       if (data.patientName) {
         patientNameBanner.textContent = data.patientName;
         patientNameBanner.style.display = 'block';
@@ -1970,6 +2013,13 @@
     let lastHandledCallId = null;
 
     socket.on('incoming_call', (data) => {
+      // STRICT OWNERSHIP CHECK: ignore events not belonging to this user
+      if (!isEventForMe(data)) {
+        console.log('[Dashboard] incoming_call REJECTED — event.agent:', data.agent, 'me:', myUsername, 'role:', myRole);
+        return;
+      }
+      console.log('[Dashboard] incoming_call ACCEPTED — event.agent:', data.agent, 'me:', myUsername, 'role:', myRole);
+
       // Skip if we already handled this exact call
       if (data.callId && data.callId === lastHandledCallId) return;
       lastHandledCallId = data.callId;
@@ -1984,13 +2034,16 @@
 
       playBeep();
 
-      // Only auto-open profile if this call belongs to the logged-in agent (or admin)
-      const isMyCall = !data.agent || myRole === 'admin' || data.agent === myUsername;
+      // Auto-open Clinicea profile: agents get their own calls, admins see all but don't auto-open
+      const shouldAutoOpen = myRole !== 'admin' && data.agent === myUsername;
       const lockKey = 'call_opened_' + data.callId;
-      if (isMyCall && !localStorage.getItem(lockKey)) {
+      if (shouldAutoOpen && !localStorage.getItem(lockKey)) {
         localStorage.setItem(lockKey, '1');
         setTimeout(() => localStorage.removeItem(lockKey), 60000);
+        console.log('[Dashboard] Auto-opening Clinicea profile for', data.caller, '— agent:', data.agent);
         window.open(data.cliniceaUrl, 'clinicea_patient');
+      } else {
+        console.log('[Dashboard] NOT auto-opening — role:', myRole, 'agent match:', data.agent === myUsername, 'lock:', !!localStorage.getItem(lockKey));
       }
 
       loadCallHistory(1);
@@ -2964,16 +3017,7 @@
       }
     });
 
-    // ===== AGENT INFO =====
-    let myUsername = null, myRole = null;
-    fetch('/api/me').then(r => r.json()).then(data => {
-      const el = document.getElementById('agentInfo');
-      if (data.username) {
-        myUsername = data.username;
-        myRole = data.role;
-        el.textContent = data.role === 'admin' ? 'Admin' : data.username.charAt(0).toUpperCase() + data.username.slice(1);
-      }
-    }).catch(() => {});
+    // ===== AGENT INFO (identity already loaded at top of script) =====
 
     // ===== INITIALIZATION =====
     loadCallHistory();
