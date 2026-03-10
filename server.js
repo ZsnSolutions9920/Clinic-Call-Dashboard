@@ -1265,11 +1265,15 @@ async function getGPTReply(phone, incomingText, chatName) {
       return `Sorry, I'm having trouble responding right now. Please call us directly at +92-300-2105374.`;
     }
 
-    const reply = data.choices?.[0]?.message?.content?.trim();
+    let reply = data.choices?.[0]?.message?.content?.trim();
     if (!reply) {
       logEvent('error', 'Groq empty response', JSON.stringify(data).substring(0, 200));
       return "Thank you for reaching out! Please call us at +92-300-2105374 for assistance.";
     }
+
+    // Ensure URLs have blank lines before and after so they're clickable on WhatsApp
+    reply = reply.replace(/([^\n])(https?:\/\/)/g, '$1\n\n$2');
+    reply = reply.replace(/(https?:\/\/[^\s]+)([^\n])/g, '$1\n\n$2');
 
     logEvent('info', `Groq reply for ${phone}`, reply.substring(0, 80));
     return reply;
