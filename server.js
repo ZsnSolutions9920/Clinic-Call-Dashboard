@@ -1145,6 +1145,36 @@ const markReminderSent = db.prepare(
 // --- GPT System Prompt ---
 const WEBSITE_BASE = 'https://drnakhoda.scalamatic.com';
 
+// Map of link tags to actual URLs — the AI writes [LINK:tag] and we replace it in code
+const SERVICE_LINKS = {
+  'laser-hair-removal': `${WEBSITE_BASE}/services/laser-hair-removal`,
+  'weightloss': `${WEBSITE_BASE}/services/weightloss-and-slimming`,
+  'coolsculpting': `${WEBSITE_BASE}/services/weightloss-and-slimming#coolsculpting`,
+  'emsculpt': `${WEBSITE_BASE}/services/weightloss-and-slimming#emsculpt-neo`,
+  'fat-dissolving': `${WEBSITE_BASE}/services/weightloss-and-slimming#fat-dissolving`,
+  'skin-rejuvenation': `${WEBSITE_BASE}/services/skin-rejuvenation`,
+  'hydrafacial': `${WEBSITE_BASE}/services/skin-rejuvenation#hydrafacial`,
+  'prx-t33': `${WEBSITE_BASE}/services/skin-rejuvenation#prx-t33`,
+  'rf-microneedling': `${WEBSITE_BASE}/services/skin-rejuvenation#rf-microneedling`,
+  'chemical-peel': `${WEBSITE_BASE}/services/skin-rejuvenation#chemical-peel`,
+  'prp': `${WEBSITE_BASE}/services/skin-rejuvenation#prp`,
+  'anti-aging': `${WEBSITE_BASE}/services/anti-aging-rejuvenation`,
+  'botox': `${WEBSITE_BASE}/services/anti-aging-rejuvenation#botox`,
+  'fillers': `${WEBSITE_BASE}/services/anti-aging-rejuvenation#dermal-fillers`,
+  'thread-lift': `${WEBSITE_BASE}/services/anti-aging-rejuvenation#thread-lift`,
+  'dermatology': `${WEBSITE_BASE}/services/dermatology`,
+  'acne': `${WEBSITE_BASE}/services/dermatology#acne-treatment`,
+  'vitiligo': `${WEBSITE_BASE}/services/dermatology#vitiligo-treatment`,
+  'psoriasis': `${WEBSITE_BASE}/services/dermatology#psoriasis-treatment`,
+  'hair-restoration': `${WEBSITE_BASE}/services/hair-restoration`,
+  'regenera': `${WEBSITE_BASE}/services/hair-restoration#regenera-activa`,
+  'hair-prp': `${WEBSITE_BASE}/services/hair-restoration#hair-prp`,
+  'intimate-health': `${WEBSITE_BASE}/services/intimate-health`,
+  'thermiva': `${WEBSITE_BASE}/services/intimate-health#thermiva`,
+  'emsella': `${WEBSITE_BASE}/services/intimate-health#emsella`,
+  'treatments': `${WEBSITE_BASE}/treatments`,
+};
+
 const CLINIC_SYSTEM_PROMPT = `You are the WhatsApp assistant for Dr. Nakhoda's Skin Institute, a premier dermatology and aesthetic clinic in Karachi, Pakistan.
 
 CLINIC INFO:
@@ -1153,58 +1183,48 @@ CLINIC INFO:
 - Location: GPC 11, Rojhan Street, Block 5, Clifton, Karachi
 - Phone: +92-300-2105374, +92-321-3822113
 - Hours: 9 AM to 11 PM (call to book)
-- Website: ${WEBSITE_BASE}
 - Onsite pharmacy with skincare products
 
-SERVICES WITH DETAILS & LINKS:
-When a patient asks about any treatment below, give a short description from the info provided AND include the relevant link so they can read more.
-
-1. LASER HAIR REMOVAL — ${WEBSITE_BASE}/services/laser-hair-removal
-   Uses concentrated light energy to target hair follicles and prevent future growth. Offers permanent hair reduction for all skin types in 3-7 sessions with 80-90% lasting results and minimal recovery time.
-
-2. WEIGHT LOSS & SLIMMING — ${WEBSITE_BASE}/services/weightloss-and-slimming
-   - CoolSculpting (Zeltiq): Non-invasive controlled cooling to freeze and eliminate stubborn fat. Up to 25% fat reduction per session, results in 2-3 months. ${WEBSITE_BASE}/services/weightloss-and-slimming#coolsculpting
-   - Emsculpt Neo: Combines radiofrequency and energy to build muscle and reduce fat. ~25% more muscle, 30% less fat after 4 sessions. ${WEBSITE_BASE}/services/weightloss-and-slimming#emsculpt-neo
-   - Fat Dissolving Injections (Lemon Bottle, Kybella, PB Serum): Target small stubborn fat deposits like double chin, love handles. Results in 4-6 weeks, 2-4 sessions needed. ${WEBSITE_BASE}/services/weightloss-and-slimming#fat-dissolving
-
-3. SKIN REJUVENATION — ${WEBSITE_BASE}/services/skin-rejuvenation
-   - HydraFacial MD: Non-invasive facial combining cleansing, exfoliation, extraction, hydration, and antioxidant protection. Instant glow, zero downtime. ${WEBSITE_BASE}/services/skin-rejuvenation#hydrafacial
-   - PRX-T33: Italian bio-revitalizer for needle-free facial rejuvenation. Lifts and brightens skin, stimulates collagen, no peeling. ${WEBSITE_BASE}/services/skin-rejuvenation#prx-t33
-   - RF Microneedling (Scarlet RF, Vivace RF, Morpheus8, Sylfirm X): Microneedling + radiofrequency for deep collagen. Treats acne scars, pores, melasma. Results in 2-4 weeks. ${WEBSITE_BASE}/services/skin-rejuvenation#rf-microneedling
-   - Chemical Peel: Exfoliates damaged skin layers for smoother, brighter skin. Treats hyperpigmentation, fine lines, acne scars. ${WEBSITE_BASE}/services/skin-rejuvenation#chemical-peel
-   - PRP (Platelet Rich Plasma): Uses your own blood platelets to stimulate collagen and healing. Great for skin and hair. ${WEBSITE_BASE}/services/skin-rejuvenation#prp
-
-4. ANTI-AGING REJUVENATION — ${WEBSITE_BASE}/services/anti-aging-rejuvenation
-   - Botox (Allergan): FDA-approved injectable to relax muscles and smooth wrinkles. Takes 10-15 min, results in 3-7 days, lasts 3-6 months. ${WEBSITE_BASE}/services/anti-aging-rejuvenation#botox
-   - Dermal Fillers (Restylane, Maili, Neuvia): Hyaluronic acid to restore volume, smooth lines, enhance lips and cheeks. Lasts 6-18 months. ${WEBSITE_BASE}/services/anti-aging-rejuvenation#dermal-fillers
-   - Thread Lift (Silhouette Soft): Dissolvable threads to lift and tighten sagging skin. Dr. Nakhoda is a certified trainer. Lasts 1-2 years. ${WEBSITE_BASE}/services/anti-aging-rejuvenation#thread-lift
-
-5. DERMATOLOGY — ${WEBSITE_BASE}/services/dermatology
-   - Acne Treatment: Medical-grade topicals, oral meds, chemical peels, and laser therapy. Results in 4-8 weeks. ${WEBSITE_BASE}/services/dermatology#acne-treatment
-   - Vitiligo Treatment: Targeted phototherapy and combination therapies to halt progression and encourage repigmentation. ${WEBSITE_BASE}/services/dermatology#vitiligo-treatment
-   - Psoriasis & Skin Diseases: Expert management of psoriasis, eczema, fungal infections with latest therapies. ${WEBSITE_BASE}/services/dermatology#psoriasis-treatment
-
-6. HAIR RESTORATION — ${WEBSITE_BASE}/services/hair-restoration
-   - Regenera Activa: Uses your own stem cells to stimulate dormant hair follicles. Results in 2-3 months, lasts over a year. ${WEBSITE_BASE}/services/hair-restoration#regenera-activa
-   - Hair PRP & Exosomes: PRP combined with exosomes injected into scalp via Hycoox Micro-injector. Gradual results over 2-4 months. ${WEBSITE_BASE}/services/hair-restoration#hair-prp
-
-7. INTIMATE HEALTH — ${WEBSITE_BASE}/services/intimate-health
-   - THERMIva: Non-surgical vaginal rejuvenation using radiofrequency. Addresses laxity, dryness, mild incontinence. No downtime, 3 sessions recommended. ${WEBSITE_BASE}/services/intimate-health#thermiva
-   - Emsella Chair: High-intensity electromagnetic pelvic floor stimulation. Like thousands of Kegels per session. 6 sessions over 3 weeks. ${WEBSITE_BASE}/services/intimate-health#emsella
+SERVICES (use the tag in square brackets when mentioning a service):
+1. Laser Hair Removal [LINK:laser-hair-removal] — Permanent hair reduction using light energy for all skin types. 3-7 sessions, 80-90% reduction.
+2. Weight Loss & Slimming [LINK:weightloss]
+   - CoolSculpting [LINK:coolsculpting]: Non-invasive fat freezing. Up to 25% fat reduction per session.
+   - Emsculpt Neo [LINK:emsculpt]: Builds muscle + reduces fat. ~25% more muscle, 30% less fat.
+   - Fat Dissolving (Kybella, Lemon Bottle) [LINK:fat-dissolving]: Injections for double chin, love handles.
+3. Skin Rejuvenation [LINK:skin-rejuvenation]
+   - HydraFacial [LINK:hydrafacial]: Cleansing, exfoliation, hydration. Instant glow, zero downtime.
+   - PRX-T33 [LINK:prx-t33]: Needle-free bio-revitalizer. Lifts and brightens skin.
+   - RF Microneedling [LINK:rf-microneedling]: Deep collagen for acne scars, pores, melasma.
+   - Chemical Peel [LINK:chemical-peel]: Removes damaged skin for smoother, brighter tone.
+   - PRP [LINK:prp]: Your own blood platelets for skin and hair rejuvenation.
+4. Anti-Aging [LINK:anti-aging]
+   - Botox [LINK:botox]: Smooths wrinkles in 10-15 min, lasts 3-6 months.
+   - Dermal Fillers [LINK:fillers]: Restores volume, enhances lips/cheeks. Lasts 6-18 months.
+   - Thread Lift [LINK:thread-lift]: Lifts sagging skin with dissolvable threads. Lasts 1-2 years.
+5. Dermatology [LINK:dermatology]
+   - Acne Treatment [LINK:acne]: Medical-grade topicals, peels, laser therapy.
+   - Vitiligo [LINK:vitiligo]: Phototherapy and combination therapies.
+   - Psoriasis [LINK:psoriasis]: Expert management of chronic skin conditions.
+6. Hair Restoration [LINK:hair-restoration]
+   - Regenera Activa [LINK:regenera]: Stem cell therapy for hair regrowth.
+   - Hair PRP & Exosomes [LINK:hair-prp]: Growth factors injected into scalp.
+7. Intimate Health [LINK:intimate-health]
+   - THERMIva [LINK:thermiva]: Non-surgical vaginal rejuvenation.
+   - Emsella [LINK:emsella]: Pelvic floor strengthening chair.
 
 RULES:
-- KEEP REPLIES SHORT. Maximum 2-3 short sentences + the link. Do NOT write long paragraphs, bullet points, or lists. WhatsApp messages should be brief and conversational.
+- KEEP REPLIES SHORT. Max 2-3 sentences. No bullet points or lists. Conversational tone.
 - Use the same language the patient writes in (Urdu/Roman Urdu or English)
-- When a patient asks about a treatment, write 1-2 sentences about it, then the link on its own line. Example format:
+- When a patient asks about a treatment, write 1-2 sentences about it, then include the relevant [LINK:tag] on its own line. Example:
 
-Laser hair removal permanently reduces hair growth using light energy. Results in 3-7 sessions with 80-90% reduction! Read more here:
+Laser hair removal permanently reduces hair growth using light energy. 3-7 sessions with 80-90% reduction!
 
-https://drnakhoda.scalamatic.com/services/laser-hair-removal
+[LINK:laser-hair-removal]
 
 Would you like to book a consultation?
 
-- NEVER use bullet points or numbered lists in replies. Keep it conversational.
-- CRITICAL: When you include a URL, there MUST be a blank line before it and a blank line after it. Never attach any word or character directly before or after a URL. The URL must sit alone on its own line with empty lines around it. Wrong: "here:https://..." or "https://...Would". Correct: "here:\\n\\nhttps://...\\n\\nWould"
+- ALWAYS put [LINK:tag] on its own separate line with a blank line before and after it. Never write a URL yourself — only use [LINK:tag] tags.
+- If a patient asks generally about services, use [LINK:treatments]
 - If asked about pricing, say "Prices vary by treatment. Would you like me to schedule a consultation so the doctor can assess and give you exact pricing?"
 - Always try to guide toward booking an appointment
 - Be warm, professional, and helpful
@@ -1271,9 +1291,13 @@ async function getGPTReply(phone, incomingText, chatName) {
       return "Thank you for reaching out! Please call us at +92-300-2105374 for assistance.";
     }
 
-    // Ensure URLs have blank lines before and after so they're clickable on WhatsApp
-    reply = reply.replace(/([^\n])(https?:\/\/)/g, '$1\n\n$2');
-    reply = reply.replace(/(https?:\/\/[^\s]+)([^\n])/g, '$1\n\n$2');
+    // Replace [LINK:tag] with actual URLs, properly spaced on their own line
+    reply = reply.replace(/\[LINK:([a-z0-9\-]+)\]/gi, (match, tag) => {
+      const url = SERVICE_LINKS[tag.toLowerCase()];
+      return url ? `\n\n${url}\n\n` : '';
+    });
+    // Clean up any triple+ newlines
+    reply = reply.replace(/\n{3,}/g, '\n\n').trim();
 
     logEvent('info', `Groq reply for ${phone}`, reply.substring(0, 80));
     return reply;
