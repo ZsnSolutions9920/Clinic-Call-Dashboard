@@ -275,33 +275,36 @@ const warnedBadAgents = new Set(); // only warn once per unknown agent value
 app.post('/heartbeat', requireWebhookSecret, (req, res) => {
   const rawAgent = (req.body.Agent || '').trim();
   const agent = (rawAgent && USERS[rawAgent]) ? rawAgent : null;
-  if (!agent) {
-    // Log once per unique bad agent value (not every 30s), skip Socket.IO emit
-    if (!warnedBadAgents.has(rawAgent)) {
-      warnedBadAgents.add(rawAgent);
-      logEvent('warn', `Heartbeat rejected: no valid agent (raw: "${rawAgent}"). Re-download the monitor installer from the dashboard.`);
-    }
-    return res.json({ status: 'ok', warning: 'no valid agent — re-download installer from dashboard' });
-  }
-  const prev = agentHeartbeats[agent] || { lastHeartbeat: 0, alive: false };
+  const key = agent || '_default';
+  const prev = agentHeartbeats[key] || { lastHeartbeat: 0, alive: false };
   const wasDown = !prev.alive;
-  agentHeartbeats[agent] = { lastHeartbeat: Date.now(), alive: true };
-  // STRICT ISOLATION: only notify the specific agent + admin
-  io.to('agent:' + agent).emit('monitor_status', { alive: true, agent });
-  io.to('role:admin').emit('monitor_status', { alive: true, agent });
-  if (wasDown) logEvent('info', `Call monitor connected: ${agent} | Rooms: agent:${agent}, role:admin`);
+  agentHeartbeats[key] = { lastHeartbeat: Date.now(), alive: true };
+  if (agent) {
+    // Known agent — notify that agent + admin
+    io.to('agent:' + agent).emit('monitor_status', { alive: true, agent });
+    io.to('role:admin').emit('monitor_status', { alive: true, agent });
+    if (wasDown) logEvent('info', `Call monitor connected: ${agent}`);
+  } else {
+    // Unknown/missing agent — still track as alive, notify admin only
+    io.to('role:admin').emit('monitor_status', { alive: true, agent: null });
+    if (wasDown) logEvent('info', `Call monitor connected (no agent tag, raw: "${rawAgent}")`);
+  }
   res.json({ status: 'ok' });
 });
 
 // Check every 15s if any agent monitor went stale
 setInterval(() => {
-  for (const [agent, state] of Object.entries(agentHeartbeats)) {
+  for (const [key, state] of Object.entries(agentHeartbeats)) {
     if (state.alive && (Date.now() - state.lastHeartbeat) > 45000) {
       state.alive = false;
-      // STRICT ISOLATION: only notify the specific agent + admin
-      io.to('agent:' + agent).emit('monitor_status', { alive: false, agent });
-      io.to('role:admin').emit('monitor_status', { alive: false, agent });
-      logEvent('warn', `Call monitor disconnected: ${agent} | Rooms: agent:${agent}, role:admin`);
+      if (key !== '_default' && USERS[key]) {
+        io.to('agent:' + key).emit('monitor_status', { alive: false, agent: key });
+        io.to('role:admin').emit('monitor_status', { alive: false, agent: key });
+        logEvent('warn', `Call monitor disconnected: ${key}`);
+      } else {
+        io.to('role:admin').emit('monitor_status', { alive: false, agent: null });
+        logEvent('warn', 'Call monitor disconnected (untagged)');
+      }
     }
   }
 }, 15000);

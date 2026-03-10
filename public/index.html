@@ -2035,13 +2035,15 @@
 
       playBeep();
 
-      // Auto-open Clinicea profile: agents get their own calls, admins see all but don't auto-open
-      const shouldAutoOpen = myRole !== 'admin' && data.agent === myUsername;
+      // Auto-open Clinicea profile:
+      // - Agent: only if call belongs to them
+      // - Admin: always (admin monitors all calls)
+      const shouldAutoOpen = myRole === 'admin' || data.agent === myUsername;
       const lockKey = 'call_opened_' + data.callId;
       if (shouldAutoOpen && !localStorage.getItem(lockKey)) {
         localStorage.setItem(lockKey, '1');
         setTimeout(() => localStorage.removeItem(lockKey), 60000);
-        console.log('[Dashboard] Auto-opening Clinicea profile for', data.caller, '— agent:', data.agent);
+        console.log('[Dashboard] Auto-opening Clinicea profile for', data.caller, '— agent:', data.agent, 'myRole:', myRole);
         window.open(data.cliniceaUrl, 'clinicea_patient');
       } else {
         console.log('[Dashboard] NOT auto-opening — role:', myRole, 'agent match:', data.agent === myUsername, 'lock:', !!localStorage.getItem(lockKey));
