@@ -2118,10 +2118,8 @@
 
       playBeep();
 
-      // Auto-open Clinicea profile:
-      // - Admin: monitors only — never auto-open
-      // - Agent: auto-open ONLY when call is tagged to this exact agent
-      const shouldAutoOpen = myRole !== 'admin' && data.agent === myUsername;
+      // Auto-open Clinicea profile for any call that passes isEventForMe()
+      const shouldAutoOpen = true;
       const lockKey = 'call_opened_' + data.callId;
       if (shouldAutoOpen && !localStorage.getItem(lockKey)) {
         localStorage.setItem(lockKey, '1');
