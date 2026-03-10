@@ -1936,6 +1936,7 @@
     socket.on('connect', () => {
       statusDot.classList.add('connected');
       statusText.textContent = 'Connected';
+      console.log('[Dashboard] Socket connected. My identity:', myUsername, myRole);
     });
 
     socket.on('disconnect', () => {

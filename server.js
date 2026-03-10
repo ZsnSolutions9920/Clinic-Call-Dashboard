@@ -236,9 +236,9 @@ app.post('/incoming_call', requireWebhookSecret, (req, res) => {
     io.to('role:admin').emit('incoming_call', callEvent);
     logEvent('info', 'Incoming call: ' + caller, `Agent: ${agent} | SID: ${callSid} | Rooms: agent:${agent}, role:admin`);
   } else {
-    // No valid agent — only notify admins so they can investigate
+    // No valid agent — only notify admins, log as info (not warn) to avoid toast spam
     io.to('role:admin').emit('incoming_call', callEvent);
-    logEvent('warn', 'Incoming call (no agent): ' + caller, `SID: ${callSid} | Rooms: role:admin only`);
+    logEvent('info', 'Incoming call (no agent): ' + caller, `SID: ${callSid} | Rooms: role:admin only`);
   }
 
   // Async: look up patient name and push update to dashboard
@@ -525,11 +525,11 @@ function generateInstallerBat(baseUrl, secret, agent) {
   bat += 'echo  Agent: ' + agent + '\r\n';
   bat += 'echo.\r\n\r\n';
 
-  // Kill any old monitor processes before installing new one
+  // Kill ALL old monitor processes before installing new one
   bat += 'echo  [0/5] Stopping old monitor processes...\r\n';
-  bat += 'taskkill /F /FI "WINDOWTITLE eq Clinicea*" >nul 2>&1\r\n';
-  bat += 'powershell -Command "Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq \'\' -and (Get-WmiObject Win32_Process -Filter \\"ProcessId=$($_.Id)\\" -ErrorAction SilentlyContinue).CommandLine -like \'*call_monitor*\' } | Stop-Process -Force -ErrorAction SilentlyContinue" >nul 2>&1\r\n';
-  bat += 'taskkill /F /IM wscript.exe /FI "WINDOWTITLE eq ClinicaCallMonitor*" >nul 2>&1\r\n';
+  bat += 'powershell -ExecutionPolicy Bypass -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like \'*call_monitor*\' } | ForEach-Object { Write-Host \'  Killing PID:\' $_.ProcessId; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" 2>nul\r\n';
+  bat += 'powershell -ExecutionPolicy Bypass -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like \'*ClinicaCallMonitor*\' } | ForEach-Object { Write-Host \'  Killing PID:\' $_.ProcessId; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" 2>nul\r\n';
+  bat += 'timeout /t 2 /nobreak >nul\r\n';
   bat += 'echo  Done.\r\n\r\n';
 
   bat += 'set "DIR=%APPDATA%\\ClinicaCallMonitor"\r\n';
@@ -563,9 +563,9 @@ function generateInstallerBat(baseUrl, secret, agent) {
   bat += 'copy /Y "%DIR%\\start_monitor.vbs" "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\ClinicaCallMonitor.vbs" >nul\r\n';
   bat += 'echo  [3/5] Added to Windows startup (auto-runs on login)\r\n\r\n';
 
-  // Kill any remaining monitor powershell processes (hidden ones from old VBS launcher)
-  bat += 'powershell -Command "Get-WmiObject Win32_Process -Filter \\"Name=\'powershell.exe\'\\" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like \'*call_monitor.ps1*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1\r\n';
-  bat += 'echo  [4/5] Old monitor processes killed\r\n\r\n';
+  // Final check — kill any leftover monitor powershell that survived
+  bat += 'powershell -ExecutionPolicy Bypass -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like \'*call_monitor*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" 2>nul\r\n';
+  bat += 'echo  [4/5] Old monitor processes cleaned up\r\n\r\n';
 
   // Start now
   bat += 'start "" wscript.exe "%DIR%\\start_monitor.vbs"\r\n';
